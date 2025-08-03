@@ -1,0 +1,194 @@
+{
+  "quality_thresholds": {
+    "min_contour_area_ratio": {
+      "default": 0.1,
+      "adaptive_range": [
+        0.05,
+        0.3
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "base_blur_threshold": {
+      "default": 100.0,
+      "adaptive_range": [
+        50.0,
+        200.0
+      ],
+      "learned_values": [
+        115.98477924893271,
+        119.31385738507376,
+        118.27402019169847,
+        88.34275482419501,
+        106.12570343935106,
+        99.19490531879566,
+        113.04175672932881,
+        94.64619417143057,
+        90.07143254093431
+      ],
+      "confidence_weight": 0.7253221263544186
+    },
+    "dark_threshold_bounds": {
+      "default": [
+        30,
+        80
+      ],
+      "adaptive_range": [
+        15,
+        120
+      ],
+      "learned_values": [
+        [
+          38,
+          221
+        ],
+        [
+          41,
+          213
+        ],
+        [
+          26,
+          234
+        ],
+        [
+          39,
+          205
+        ],
+        [
+          43,
+          230
+        ],
+        [
+          32,
+          209
+        ],
+        [
+          42,
+          249
+        ],
+        [
+          25,
+          211
+        ],
+        [
+          44,
+          235
+        ]
+      ],
+      "confidence_weight": 0.7253221263544186
+    },
+    "bright_threshold_bounds": {
+      "default": [
+        180,
+        240
+      ],
+      "adaptive_range": [
+        150,
+        255
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "skew_tolerance": {
+      "default": 8.0,
+      "adaptive_range": [
+        3.0,
+        15.0
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "text_area_ratio_threshold": {
+      "default": 0.01,
+      "adaptive_range": [
+        0.005,
+        0.05
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    }
+  },
+  "extraction_confidence": {
+    "colon_terminator_boost": {
+      "default": 0.2,
+      "adaptive_range": [
+        0.1,
+        0.5
+      ],
+      "learned_values": [
+        0.2,
+        0.2,
+        0.2,
+        0.2,
+        0.2,
+        0.2,
+        0.20000000000000004,
+        0.2,
+        0.2
+      ],
+      "confidence_weight": 0.6932114407729505
+    },
+    "suffix_indicator_boost": {
+      "default": 0.4,
+      "adaptive_range": [
+        0.2,
+        0.7
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "form_left_position_threshold": {
+      "default": 150,
+      "adaptive_range": [
+        50,
+        300
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "proximity_distance_threshold": {
+      "default": 300,
+      "adaptive_range": [
+        150,
+        600
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    }
+  },
+  "semantic_thresholds": {
+    "min_pairing_confidence": {
+      "default": 0.3,
+      "adaptive_range": [
+        0.15,
+        0.6
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "high_confidence_split_key": {
+      "default": 0.9,
+      "adaptive_range": [
+        0.7,
+        0.95
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    },
+    "semantic_compatibility_threshold": {
+      "default": 0.4,
+      "adaptive_range": [
+        0.2,
+        0.7
+      ],
+      "learned_values": [],
+      "confidence_weight": 0.0
+    }
+  },
+  "learning_config": {
+    "learning_rate": 0.1,
+    "confidence_decay": 0.95,
+    "min_samples_for_adaptation": 5,
+    "max_history_size": 100
+  }
+}

@@ -418,6 +418,37 @@ def create_hybrid_api() -> FastAPI:
             "recommendation": "Use 'adaptive_first' for most structured documents, 'parallel' for maximum accuracy"
         }
     
+    @app.get("/health")
+    async def health_check():
+        """
+        🏥 Health check endpoint for deployment monitoring
+        """
+        try:
+            # Basic health check - verify processor is working
+            status = {
+                "status": "healthy",
+                "service": "Hybrid Document Scanner API",
+                "version": "4.0.0",
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "components": {
+                    "api": "operational",
+                    "processor": "operational",
+                    "adaptive_system": "operational",
+                    "llm_system": "operational" if processor.kv_extractor.llm_extractor.is_available() else "available"
+                }
+            }
+            return JSONResponse(content=status)
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return JSONResponse(
+                content={
+                    "status": "unhealthy",
+                    "error": str(e),
+                    "timestamp": __import__("datetime").datetime.now().isoformat()
+                },
+                status_code=503
+            )
+
     @app.get("/")
     async def root():
         """

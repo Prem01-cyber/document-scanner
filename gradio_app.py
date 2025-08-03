@@ -428,9 +428,7 @@ def create_modern_interface():
         }
         return "✅ Statistics reset successfully"
     
-    def update_provider_display(selected_provider):
-        """Update the current provider display when user changes selection"""
-        return f"**🎯 Current Active:** {selected_provider.title()}"
+
     
     # Create the interface
     with gr.Blocks(
@@ -451,10 +449,6 @@ def create_modern_interface():
         
         Upload a document image and extract structured information automatically.
         """)
-        
-        # Status bar
-        with gr.Row():
-            status_display = gr.Markdown(processor.processor_status, elem_classes=["status-bar"])
             
         with gr.Row():
             # Left column - Input
@@ -501,11 +495,7 @@ def create_modern_interface():
                     info="Choose AI provider for LLM strategies (only available providers shown)"
                 )
                 
-                # Show current active provider info
-                current_provider_display = gr.Markdown(
-                    f"**🎯 Current Active:** {default_provider.title()}",
-                    elem_classes=["status-bar"]
-                )
+
                 
                 process_btn = gr.Button(
                     "🚀 Process Document",
@@ -597,7 +587,7 @@ def create_modern_interface():
         process_btn.click(
             fn=process_document_ui,
             inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
-            outputs=[result_image, result_table, result_summary, status_display]
+            outputs=[result_image, result_table, result_summary]
         )
         
         status_btn.click(
@@ -606,16 +596,10 @@ def create_modern_interface():
         )
         
         reset_btn.click(
-            fn=reset_stats,
-            outputs=[status_display]
+            fn=reset_stats
         )
         
-        # Update provider display when selection changes
-        llm_provider_input.change(
-            fn=update_provider_display,
-            inputs=[llm_provider_input],
-            outputs=[current_provider_display]
-        )
+
     
     return demo
 

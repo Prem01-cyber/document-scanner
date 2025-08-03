@@ -1,0 +1,15 @@
+# Ignore all files in the credentials directory
+credentials/
+
+# Ignore all files in the .venv directory
+.venv/
+
+# Ignore all files in the logs directory
+logs/
+
+# Ignore python cache files
+__pycache__/
+
+# Ignore env files
+.env
+

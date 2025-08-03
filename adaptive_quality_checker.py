@@ -103,8 +103,15 @@ class AdaptiveDocumentQualityChecker:
             else:
                 gray = image.copy()
             
-            # Ensure proper data type
+            # Ensure proper data type and shape
             gray = np.asarray(gray, dtype=np.uint8)
+            
+            # Ensure it's 2D
+            if len(gray.shape) > 2:
+                gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+            elif len(gray.shape) == 1:
+                # Invalid image data
+                raise ValueError("Invalid image format: 1D array")
                 
             # Calculate adaptive thresholds using learned parameters
             thresholds = self._get_adaptive_thresholds(image)

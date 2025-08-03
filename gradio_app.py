@@ -73,17 +73,19 @@ class DocumentProcessor:
             # Check LLM providers
             llm_info = self.processor.kv_extractor.llm_extractor.get_provider_info()
             llm_available = self.processor.kv_extractor.llm_extractor.is_available()
+            current_provider = self.processor.kv_extractor.llm_extractor.primary_provider.value
             
-            available_providers = []
-            for provider, info in llm_info.items():
-                if info.get('available', False):
-                    available_providers.append(provider)
+            # Get available providers (just the names from the actual available_providers dict)
+            available_providers = list(self.processor.kv_extractor.llm_extractor.available_providers.keys())
+            available_provider_names = [p.value for p in available_providers]
             
             return {
                 "status": "✅ System Ready",
                 "processor": "✅ Operational",
                 "llm_providers": f"✅ {len(available_providers)} available" if available_providers else "⚠️ None available",
-                "available_providers": available_providers,
+                "available_providers": available_provider_names,
+                "current_provider": current_provider,
+                "provider_details": llm_info,
                 "stats": self.stats
             }
             
@@ -94,7 +96,7 @@ class DocumentProcessor:
                 "recommendations": "Some features may not work properly"
             }
     
-    def process_document(self, image, strategy="adaptive_first", confidence=0.5):
+    def process_document(self, image, strategy="adaptive_first", confidence=0.5, llm_provider="ollama"):
         """Process document with comprehensive error handling"""
         start_time = time.time()
         
@@ -127,6 +129,17 @@ class DocumentProcessor:
                 strategy_enum = ExtractionStrategy(strategy)
                 self.processor.kv_extractor.set_strategy(strategy_enum)
                 self.processor.kv_extractor.adaptive_confidence_threshold = confidence
+                
+                # Set LLM provider if using LLM strategies
+                if strategy in ["llm_first", "parallel", "confidence_based"]:
+                    try:
+                        provider_enum = LLMProvider(llm_provider)
+                        self.processor.kv_extractor.llm_extractor.primary_provider = provider_enum
+                        logger.info(f"Set LLM provider to: {llm_provider}")
+                    except (ValueError, AttributeError) as llm_error:
+                        logger.warning(f"Could not set LLM provider {llm_provider}: {llm_error}")
+                        # Continue with default provider
+                        
             except ValueError as e:
                 self.stats["failed"] += 1
                 return self._create_error_response(f"Invalid strategy: {strategy}")
@@ -182,18 +195,30 @@ class DocumentProcessor:
                 pair.get("source", "unknown")
             ])
         
+        # Get LLM provider info if available
+        llm_used = "Not used"
+        try:
+            if self.processor and hasattr(self.processor, 'kv_extractor'):
+                llm_used = self.processor.kv_extractor.llm_extractor.primary_provider.value
+        except:
+            pass
+        
         # Create summary
         summary = f"""### ✅ Processing Successful
         
 **⏱️ Processing Time:** {processing_time:.2f} seconds  
 **📊 Extracted Pairs:** {len(pairs)}  
 **🎯 Strategy Used:** {result.get('extraction_metadata', {}).get('strategy_used', 'unknown')}  
-**🔧 Primary Method:** {result.get('extraction_metadata', {}).get('primary_method', 'unknown')}
+**🔧 Primary Method:** {result.get('extraction_metadata', {}).get('primary_method', 'unknown')}  
+**🤖 LLM Provider:** {llm_used}
 
 **📈 Confidence Distribution:**
 - High (>0.8): {sum(1 for p in pairs if p.get('confidence', 0) > 0.8)} pairs  
 - Medium (0.5-0.8): {sum(1 for p in pairs if 0.5 < p.get('confidence', 0) <= 0.8)} pairs  
 - Low (<0.5): {sum(1 for p in pairs if p.get('confidence', 0) <= 0.5)} pairs
+
+**📋 Method Breakdown:**
+{self._get_method_breakdown(pairs)}
 """
         
         return {
@@ -256,15 +281,76 @@ class DocumentProcessor:
                     cv2.line(img_array, key_center, value_center, colors["connection"], 1)
         
         return Image.fromarray(img_array)
+    
+    def _get_method_breakdown(self, pairs):
+        """Get breakdown of extraction methods used"""
+        methods = {}
+        for pair in pairs:
+            method = pair.get("source", "unknown")
+            methods[method] = methods.get(method, 0) + 1
+        
+        breakdown = []
+        for method, count in methods.items():
+            percentage = (count / len(pairs)) * 100 if pairs else 0
+            breakdown.append(f"- {method.title()}: {count} pairs ({percentage:.1f}%)")
+        
+        return "\n".join(breakdown) if breakdown else "- No data available"
+    
+    def get_available_providers(self):
+        """Get available LLM providers for UI"""
+        if not self.system_ready or not self.processor:
+            return ["ollama"], "ollama"  # fallback
+        
+        try:
+            # Get available providers from the actual system
+            available_providers = list(self.processor.kv_extractor.llm_extractor.available_providers.keys())
+            provider_names = [p.value for p in available_providers]
+            current_provider = self.processor.kv_extractor.llm_extractor.primary_provider.value
+            
+            # Create choices with nice labels
+            provider_choices = []
+            for provider_name in provider_names:
+                if provider_name == "ollama":
+                    provider_choices.append(("🦙 Ollama (Local)", "ollama"))
+                elif provider_name == "openai":
+                    provider_choices.append(("🤖 OpenAI GPT", "openai"))
+                elif provider_name == "anthropic":
+                    provider_choices.append(("🧠 Anthropic Claude", "anthropic"))
+                elif provider_name == "azure_openai":
+                    provider_choices.append(("☁️ Azure OpenAI", "azure_openai"))
+                else:
+                    provider_choices.append((f"🔧 {provider_name.title()}", provider_name))
+            
+            # If no providers available, fallback to all options (will show errors when used)
+            if not provider_choices:
+                provider_choices = [
+                    ("🦙 Ollama (Local) - Not Available", "ollama"),
+                    ("🤖 OpenAI GPT - Not Available", "openai"),
+                    ("🧠 Anthropic Claude - Not Available", "anthropic"),
+                    ("☁️ Azure OpenAI - Not Available", "azure_openai"),
+                ]
+                current_provider = "ollama"  # fallback
+            
+            return provider_choices, current_provider
+            
+        except Exception as e:
+            logger.warning(f"Could not get provider info: {e}")
+            # Fallback to default options
+            return [
+                ("🦙 Ollama (Local)", "ollama"),
+                ("🤖 OpenAI GPT", "openai"),
+                ("🧠 Anthropic Claude", "anthropic"),
+                ("☁️ Azure OpenAI", "azure_openai"),
+            ], "ollama"
 
 def create_modern_interface():
     """Create a modern, clean Gradio interface"""
     
     processor = DocumentProcessor()
     
-    def process_document_ui(image, strategy, confidence):
+    def process_document_ui(image, strategy, confidence, llm_provider):
         """Main processing function for UI"""
-        result = processor.process_document(image, strategy, confidence)
+        result = processor.process_document(image, strategy, confidence, llm_provider)
         
         if result["success"]:
             return (
@@ -285,6 +371,28 @@ def create_modern_interface():
         """Get system status for UI"""
         status = processor.get_system_status()
         
+        # Get current LLM provider info
+        current_llm = "Unknown"
+        llm_details = ""
+        
+        if processor.system_ready:
+            try:
+                current_llm = processor.processor.kv_extractor.llm_extractor.primary_provider.value
+                llm_info = processor.processor.kv_extractor.llm_extractor.get_provider_info()
+                available_providers = list(processor.processor.kv_extractor.llm_extractor.available_providers.keys())
+                
+                llm_details = f"\n**🤖 LLM Provider Status:**\n"
+                llm_details += f"- **Active Provider**: 🎯 **{current_llm.upper()}**\n"
+                llm_details += f"- **Available Providers**: {len(available_providers)}\n\n"
+                
+                for provider, info in llm_info.items():
+                    status_icon = "✅" if provider in [p.value for p in available_providers] else "❌"
+                    model = info.get('model', 'unknown')
+                    llm_details += f"- **{provider.title()}**: {status_icon} Model: {model}\n"
+                    
+            except Exception as e:
+                llm_details = f"\n**LLM Error:** {str(e)[:50]}...\n"
+        
         status_text = f"""## 🔧 System Status
 
 **Overall Status:** {status['status']}
@@ -292,8 +400,11 @@ def create_modern_interface():
 **Components:**
 - **Document Processor:** {status.get('processor', 'Unknown')}
 - **LLM Providers:** {status.get('llm_providers', 'Unknown')}
+- **Current LLM:** {current_llm}
 
 **Available Providers:** {', '.join(status.get('available_providers', ['None']))}
+
+{llm_details}
 
 **Session Statistics:**
 - **Documents Processed:** {processor.stats['total_processed']}
@@ -316,6 +427,10 @@ def create_modern_interface():
             "last_processed": None
         }
         return "✅ Statistics reset successfully"
+    
+    def update_provider_display(selected_provider):
+        """Update the current provider display when user changes selection"""
+        return f"**🎯 Current Active:** {selected_provider.title()}"
     
     # Create the interface
     with gr.Blocks(
@@ -374,6 +489,22 @@ def create_modern_interface():
                     step=0.1,
                     label="Confidence Threshold",
                     info="Higher = fewer but more confident results"
+                )
+                
+                # Get available providers dynamically
+                provider_choices, default_provider = processor.get_available_providers()
+                
+                llm_provider_input = gr.Radio(
+                    choices=provider_choices,
+                    value=default_provider,
+                    label="LLM Provider",
+                    info="Choose AI provider for LLM strategies (only available providers shown)"
+                )
+                
+                # Show current active provider info
+                current_provider_display = gr.Markdown(
+                    f"**🎯 Current Active:** {default_provider.title()}",
+                    elem_classes=["status-bar"]
                 )
                 
                 process_btn = gr.Button(
@@ -446,13 +577,26 @@ def create_modern_interface():
         - **📸 Image Quality:** Use clear, well-lit images
         - **🔄 Strategy:** Try 'Adaptive First' for forms, 'LLM First' for complex documents  
         - **⚙️ Confidence:** Lower threshold (0.3) for more results, higher (0.7) for quality
+        - **🤖 LLM Provider:** Interface shows only available providers
         - **🔧 Troubleshooting:** Check system status if processing fails
+        
+        **📋 Strategy Guide:**
+        - **Adaptive First**: Fast, good for structured documents
+        - **LLM First**: Slower but better for complex layouts  
+        - **Parallel**: Best accuracy, uses both methods
+        - **Adaptive Only**: Fastest, no LLM required
+        
+        **🔌 Provider Setup:**
+        - **Ollama**: Run `ollama serve` and install models locally
+        - **OpenAI**: Set `OPENAI_API_KEY` environment variable
+        - **Anthropic**: Set `ANTHROPIC_API_KEY` environment variable  
+        - **Azure**: Set Azure OpenAI credentials in environment
         """)
         
         # Event handlers
         process_btn.click(
             fn=process_document_ui,
-            inputs=[image_input, strategy_input, confidence_input],
+            inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
             outputs=[result_image, result_table, result_summary, status_display]
         )
         
@@ -464,6 +608,13 @@ def create_modern_interface():
         reset_btn.click(
             fn=reset_stats,
             outputs=[status_display]
+        )
+        
+        # Update provider display when selection changes
+        llm_provider_input.change(
+            fn=update_provider_display,
+            inputs=[llm_provider_input],
+            outputs=[current_provider_display]
         )
     
     return demo

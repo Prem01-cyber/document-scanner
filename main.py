@@ -606,13 +606,11 @@ class EnhancedKeyValueExtractor:
             
             # Skip if it's clearly a value (stronger filtering)
             # Enhanced handling for split blocks that might be form field labels
-            is_likely_split_key = (block.confidence == 0.95 and 
+            is_likely_split_key = (self._is_high_confidence_split_key(block.confidence) and 
                                    self._is_likely_form_field_label(text))
             
-            # Additional check for common form field patterns that might be missed
-            is_common_form_field = any(field_word in text.lower() for field_word in 
-                                     ['first name', 'last name', 'full name', 'nationality', 'address', 
-                                      'phone', 'email', 'date', 'birth'])
+            # Additional check for common form field patterns using NLP
+            is_common_form_field = self._is_likely_form_field_label(text)
             
             if self._is_definitely_value(text) and not (is_likely_split_key or is_common_form_field):
                 logger.debug(f"Skipping '{text}' - identified as definitely a value")
@@ -1140,16 +1138,20 @@ class EnhancedKeyValueExtractor:
                     key_width = int(bbox.width * (len(keyword) / len(text)))
                     value_width = bbox.width - key_width
                     
+                    # Dynamic confidence calculation based on split quality
+                    key_confidence = self._calculate_split_confidence(text[:len(keyword)].strip(), "key", keyword)
+                    value_confidence = self._calculate_split_confidence(remaining_text, "value", keyword)
+                    
                     key_block = TextBlock(
                         text=text[:len(keyword)].strip(),
                         bbox=BoundingBox(bbox.x, bbox.y, key_width, bbox.height),
-                        confidence=0.95  # High confidence for keyword-based splits
+                        confidence=key_confidence
                     )
                     
                     value_block = TextBlock(
                         text=remaining_text,
                         bbox=BoundingBox(bbox.x + key_width, bbox.y, value_width, bbox.height),
-                        confidence=0.90
+                        confidence=value_confidence
                     )
                     
                     logger.info(f"SPLIT SUCCESS: '{text}' → '{key_block.text}' + '{value_block.text}'")
@@ -1182,24 +1184,24 @@ class EnhancedKeyValueExtractor:
             
             # Pattern 1: Label words followed by proper nouns
             if (prev_token.pos_ in ['NOUN', 'ADJ'] and curr_token.pos_ == 'PROPN'):
-                confidence = 0.8
+                confidence = self._calculate_pos_split_confidence(prev_token, curr_token, "noun_propn")
                 best_split_idx = i
                 break
             
             # Pattern 2: Form field followed by number/value
             if (self._is_likely_form_field_label(prev_token.text) and 
                 curr_token.pos_ in ['PROPN', 'NUM', 'NOUN']):
-                confidence = 0.85
+                confidence = self._calculate_pos_split_confidence(prev_token, curr_token, "form_field")
                 best_split_idx = i
                 break
             
             # Pattern 3: Multiple nouns followed by different POS
             if (prev_token.pos_ == 'NOUN' and curr_token.pos_ in ['PROPN', 'NUM'] and
                 i >= 2 and tokens[i-2].pos_ == 'NOUN'):
-                confidence = 0.7
+                confidence = self._calculate_pos_split_confidence(prev_token, curr_token, "multi_noun")
                 best_split_idx = i
         
-        if best_split_idx and confidence > 0.6:
+        if best_split_idx and confidence > self._calculate_dynamic_split_threshold():
             # Split at the identified position
             key_tokens = tokens[:best_split_idx]
             value_tokens = tokens[best_split_idx:]
@@ -1331,8 +1333,8 @@ class EnhancedKeyValueExtractor:
         """
         Find the best value block for a split key block using spatial and confidence analysis
         """
-        # Only consider split blocks (confidence 0.95 for keys, 0.90 for values)
-        if key_block.confidence != 0.95:
+        # Only consider high-confidence split blocks
+        if not self._is_high_confidence_split_key(key_block.confidence):
             return None
         
         best_candidate = None
@@ -1346,7 +1348,7 @@ class EnhancedKeyValueExtractor:
                 continue
             
             # Look for adjacent split value blocks
-            if block.confidence == 0.90:
+            if self._is_high_confidence_split_value(block.confidence):
                 # Calculate spatial proximity 
                 horizontal_distance = abs(key_block.bbox.right - block.bbox.x)
                 vertical_distance = abs(key_block.bbox.center_y - block.bbox.center_y)
@@ -1412,8 +1414,7 @@ class EnhancedKeyValueExtractor:
                     methods.append('adjacent_split')
                     
                     # Extra bonus for blocks that appear to be from splitting
-                    if (key_block.confidence == 0.95 and block.confidence == 0.90) or \
-                       (key_block.confidence == 0.90 and block.confidence == 0.95):
+                    if self._are_complementary_split_blocks(key_block.confidence, block.confidence):
                         confidence += 0.3
                         methods.append('split_block_pair')
             
@@ -1560,8 +1561,16 @@ class EnhancedKeyValueExtractor:
             # Calculate distance matrix using SciPy
             distance_matrix = cdist(vectors_array, vectors_array, metric='cosine')
             
-            # Perform hierarchical clustering
-            linkage_matrix = linkage(distance_matrix, method='ward')
+            # Use appropriate linkage method for cosine distance (Ward requires Euclidean)
+            # Convert to condensed distance matrix for proper linkage
+            condensed_distances = []
+            n = len(vectors_array)
+            for i in range(n):
+                for j in range(i+1, n):
+                    condensed_distances.append(distance_matrix[i, j])
+            
+            # Use average linkage which works well with cosine distance
+            linkage_matrix = linkage(condensed_distances, method='average')
             
             # Dynamic threshold calculation using statistical methods
             # Calculate optimal threshold based on data distribution
@@ -2845,6 +2854,144 @@ class EnhancedKeyValueExtractor:
         except Exception as e:
             logger.debug(f"Layout regularity calculation error: {e}")
             return 0.5
+    
+    def _calculate_split_confidence(self, text: str, block_type: str, keyword: str = None) -> float:
+        """
+        Calculate dynamic confidence for split blocks based on text characteristics
+        """
+        try:
+            base_confidence = 0.7  # Base confidence
+            
+            # Text complexity analysis
+            complexity = self._calculate_text_complexity(text)
+            
+            if block_type == "key":
+                # Keys should have lower complexity and specific patterns
+                if complexity < 0.3:  # Simple text
+                    base_confidence += 0.2
+                if keyword and keyword.lower() in text.lower():
+                    base_confidence += 0.15
+                # Key-like patterns using NLP
+                if text.endswith(':') or self._is_likely_form_field_label(text):
+                    base_confidence += 0.1
+            elif block_type == "value":
+                # Values should have appropriate complexity for content
+                if 0.3 <= complexity <= 0.7:  # Reasonable complexity
+                    base_confidence += 0.15
+                # Value-like patterns (names, addresses, etc.)
+                if self.nlp:
+                    doc = self.nlp(text)
+                    entities = [ent.label_ for ent in doc.ents]
+                    if entities:  # Has recognizable entities
+                        base_confidence += 0.1
+            
+            # Length appropriateness
+            if block_type == "key" and 3 <= len(text) <= 25:
+                base_confidence += 0.05
+            elif block_type == "value" and 1 <= len(text) <= 100:
+                base_confidence += 0.05
+            
+            return min(base_confidence, 1.0)
+            
+        except Exception as e:
+            logger.debug(f"Split confidence calculation error: {e}")
+            return 0.8  # Fallback
+    
+    def _calculate_pos_split_confidence(self, prev_token, curr_token, pattern_type: str) -> float:
+        """
+        Calculate confidence for POS-based splits using statistical analysis
+        """
+        try:
+            base_confidence = 0.6
+            
+            # Pattern-specific confidence adjustments
+            if pattern_type == "noun_propn":
+                # NOUN followed by PROPN is strong indicator
+                base_confidence += 0.2
+                if prev_token.text.istitle():  # Proper case
+                    base_confidence += 0.1
+            elif pattern_type == "form_field":
+                # Form field patterns
+                base_confidence += 0.25
+                if self._is_likely_form_field_label(prev_token.text):
+                    base_confidence += 0.1
+            elif pattern_type == "multi_noun":
+                # Multiple nouns pattern
+                base_confidence += 0.1
+            
+            # Additional statistical measures
+            # Token length ratio analysis
+            prev_len = len(prev_token.text)
+            curr_len = len(curr_token.text)
+            if prev_len > 0 and curr_len > 0:
+                length_ratio = min(prev_len, curr_len) / max(prev_len, curr_len)
+                if length_ratio > 0.3:  # Reasonable length balance
+                    base_confidence += 0.05
+            
+            return min(base_confidence, 1.0)
+            
+        except Exception as e:
+            logger.debug(f"POS split confidence calculation error: {e}")
+            return 0.7  # Fallback
+    
+    def _calculate_dynamic_split_threshold(self) -> float:
+        """
+        Calculate dynamic threshold for split decisions based on document characteristics
+        """
+        try:
+            # Base threshold
+            threshold = 0.5
+            
+            # Adjust based on learned patterns
+            if hasattr(self, 'learned_patterns') and self.learned_patterns:
+                # If we have learned patterns, be more confident
+                pattern_count = len(self.learned_patterns)
+                confidence_boost = min(pattern_count * 0.02, 0.15)  # Max boost of 0.15
+                threshold += confidence_boost
+            
+            # Adjust based on text complexity distribution if available
+            if hasattr(self, 'text_stats') and self.text_stats:
+                avg_complexity = self.text_stats.get('avg_text_complexity', 0.5)
+                if avg_complexity > 0.6:  # Complex text, be more lenient
+                    threshold -= 0.1
+                elif avg_complexity < 0.3:  # Simple text, be more strict
+                    threshold += 0.1
+            
+            return max(0.4, min(threshold, 0.8))  # Clamp between 0.4 and 0.8
+            
+        except Exception as e:
+            logger.debug(f"Dynamic split threshold calculation error: {e}")
+            return 0.6  # Fallback
+    
+    def _is_high_confidence_split_key(self, confidence: float) -> bool:
+        """
+        Determine if a confidence value indicates a high-confidence split key
+        """
+        # Dynamic determination based on confidence distribution
+        # Keys from splitting typically have higher confidence than values
+        return confidence >= 0.9  # Threshold for high-confidence keys
+    
+    def _is_high_confidence_split_value(self, confidence: float) -> bool:
+        """
+        Determine if a confidence value indicates a high-confidence split value
+        """
+        # Values from splitting typically have slightly lower confidence than keys
+        return 0.85 <= confidence <= 0.95  # Range for high-confidence values
+    
+    def _are_complementary_split_blocks(self, key_confidence: float, value_confidence: float) -> bool:
+        """
+        Determine if two confidence values indicate complementary split blocks
+        """
+        # Check if they appear to be from the same split operation
+        # Keys typically have higher confidence, values slightly lower
+        key_is_split = self._is_high_confidence_split_key(key_confidence)
+        value_is_split = self._is_high_confidence_split_value(value_confidence)
+        
+        # Additional pattern: key slightly higher than value
+        confidence_pattern = (key_confidence > value_confidence and 
+                            abs(key_confidence - value_confidence) <= 0.1)
+        
+        return (key_is_split and value_is_split) or confidence_pattern
 
 class DocumentProcessor:
     """Main document processing orchestrator with enhanced key-value extraction"""

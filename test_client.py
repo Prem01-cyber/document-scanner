@@ -93,7 +93,18 @@ def print_quality_result(result: dict):
     """Pretty print quality assessment result"""
     if "error" in result:
         print(f"❌ Error: {result['error']}")
-        print(f"   Message: {result['message']}")
+        if "message" in result:
+            print(f"   Message: {result['message']}")
+        
+        # Try to extract more detailed error info if available
+        if isinstance(result.get('message'), str):
+            try:
+                import json
+                error_detail = json.loads(result['message'])
+                if 'detail' in error_detail:
+                    print(f"   Details: {error_detail['detail']}")
+            except (json.JSONDecodeError, TypeError):
+                pass
         return
         
     qa = result.get('quality_assessment', {})
@@ -114,7 +125,22 @@ def print_scan_result(result: dict):
     """Pretty print complete scan result"""
     if "error" in result:
         print(f"❌ Error: {result['error']}")
-        print(f"   Message: {result['message']}")
+        if "message" in result:
+            print(f"   Message: {result['message']}")
+        
+        # Try to extract more detailed error info if available  
+        if isinstance(result.get('message'), str):
+            try:
+                import json
+                error_detail = json.loads(result['message'])
+                if 'detail' in error_detail:
+                    print(f"   Details: {error_detail['detail']}")
+                    # Check for specific error types
+                    if "JSON serializable" in error_detail['detail']:
+                        print(f"   🔧 This appears to be a server-side data type conversion issue.")
+                        print(f"   💡 Try restarting the server or check server logs for more details.")
+            except (json.JSONDecodeError, TypeError):
+                pass
         return
         
     status = result.get('status')
@@ -135,9 +161,21 @@ def print_scan_result(result: dict):
         print(f"   Client: {result.get('client_processing_time', 0):.2f}s")
         print(f"   Text Blocks: {result.get('text_blocks_count', 0)}")
         
+        # Always show extracted text blocks
+        text_blocks = result.get('extracted_text_blocks', [])
+        print(f"\n📝 All Extracted Text Blocks ({len(text_blocks)}):")
+        for i, block in enumerate(text_blocks, 1):
+            # Truncate long text for readability
+            display_text = block['text'][:100] + '...' if len(block['text']) > 100 else block['text']
+            print(f"   {i}. \"{display_text}\"")
+            print(f"      Box: ({block['bbox']['x']}, {block['bbox']['y']}) "
+                  f"{block['bbox']['width']}×{block['bbox']['height']}")
+            print(f"      Confidence: {block['confidence']:.2f}")
+            print()
+        
         # Key-value pairs
         kv_pairs = result.get('key_value_pairs', [])
-        print(f"\n🔑 Extracted Key-Value Pairs ({len(kv_pairs)}):")
+        print(f"🔑 Extracted Key-Value Pairs ({len(kv_pairs)}):")
         
         if not kv_pairs:
             print("   No key-value pairs found")
@@ -288,6 +326,14 @@ def interactive_mode():
             if os.path.exists(image_path):
                 result = client.quality_check(image_path)
                 print_quality_result(result)
+                
+                # If there's a server error, provide troubleshooting tips
+                if "error" in result and "HTTP 500" in str(result.get('error', '')):
+                    print("\n🛠️  Troubleshooting Tips:")
+                    print("   • The server may need to be restarted")
+                    print("   • Check server logs for detailed error information") 
+                    print("   • Ensure all dependencies are properly installed")
+                    print("   • Try a different image format if the issue persists")
             else:
                 print("❌ File not found")
                 
@@ -296,6 +342,14 @@ def interactive_mode():
             if os.path.exists(image_path):
                 result = client.scan_document(image_path)
                 print_scan_result(result)
+                
+                # If there's a server error, provide troubleshooting tips
+                if "error" in result and "HTTP 500" in str(result.get('error', '')):
+                    print("\n🛠️  Troubleshooting Tips:")
+                    print("   • The server may need to be restarted")
+                    print("   • Check server logs for detailed error information")
+                    print("   • Ensure all dependencies are properly installed")
+                    print("   • Try a different image format if the issue persists")
             else:
                 print("❌ File not found")
                 

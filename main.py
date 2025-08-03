@@ -1202,12 +1202,20 @@ class EnhancedKeyValueExtractor:
                 best_split_idx = i
         
         if best_split_idx and confidence > self._calculate_dynamic_split_threshold():
+            # Check if this might be an address or coherent text that shouldn't be split
+            if self._should_preserve_as_coherent_text(text, best_split_idx, tokens):
+                return []  # Don't split
+            
             # Split at the identified position
             key_tokens = tokens[:best_split_idx]
             value_tokens = tokens[best_split_idx:]
             
             key_text = ' '.join([t.text for t in key_tokens])
             value_text = ' '.join([t.text for t in value_tokens])
+            
+            # Dynamic confidence calculation
+            key_confidence = self._calculate_split_confidence(key_text, "key")
+            value_confidence = self._calculate_split_confidence(value_text, "value")
             
             # Estimate bbox splitting
             key_ratio = len(key_text) / len(text)
@@ -1217,13 +1225,13 @@ class EnhancedKeyValueExtractor:
             key_block = TextBlock(
                 text=key_text,
                 bbox=BoundingBox(bbox.x, bbox.y, key_width, bbox.height),
-                confidence=confidence
+                confidence=key_confidence
             )
             
             value_block = TextBlock(
                 text=value_text,
                 bbox=BoundingBox(bbox.x + key_width, bbox.y, value_width, bbox.height),
-                confidence=confidence - 0.1
+                confidence=value_confidence
             )
             
             return [key_block, value_block]
@@ -1444,11 +1452,26 @@ class EnhancedKeyValueExtractor:
                     confidence += 0.4
                     methods.append('form_field_semantic_match')
                 
-                # Special boost for Address fields with address-like values
-                if ('address' in key_block.text.lower() and 
-                    self._looks_like_address_or_coherent_text(block.text)):
-                    confidence += 0.3
-                    methods.append('address_field_boost')
+                # Special handling for Address fields
+                if 'address' in key_block.text.lower():
+                    # Check if this block is part of a split address that should be combined
+                    combined_address = self._find_complete_address_for_key(key_block, all_blocks, block)
+                    if combined_address and combined_address != block.text:
+                        # Create a new block with the complete address
+                        logger.debug(f"Combining address parts for '{key_block.text}': '{combined_address}'")
+                        # Update the current block's text to the complete address
+                        block_with_complete_address = TextBlock(
+                            text=combined_address,
+                            bbox=block.bbox,  # Use original bbox for now
+                            confidence=max(block.confidence, 0.9)
+                        )
+                        # Replace the current block reference
+                        block = block_with_complete_address
+                        confidence += 0.4
+                        methods.append('complete_address_combination')
+                    elif self._looks_like_address_or_coherent_text(block.text):
+                        confidence += 0.3
+                        methods.append('address_field_boost')
             
             # Method 3: Proximity scoring (closer is better)
             total_distance = np.sqrt(horizontal_distance**2 + vertical_distance**2)
@@ -2992,6 +3015,191 @@ class EnhancedKeyValueExtractor:
                             abs(key_confidence - value_confidence) <= 0.1)
         
         return (key_is_split and value_is_split) or confidence_pattern
+    
+    def _should_preserve_as_coherent_text(self, text: str, split_idx: int, tokens) -> bool:
+        """
+        Determine if text should be preserved as coherent rather than split
+        """
+        try:
+            if not self.nlp:
+                return False
+            
+            doc = self.nlp(text)
+            
+            # 1. Check if it's a recognized address/location entity
+            location_entities = [ent for ent in doc.ents if ent.label_ in ['GPE', 'LOC', 'FAC']]
+            if location_entities:
+                # If the entity spans across the split point, preserve it
+                for ent in location_entities:
+                    entity_tokens = [token for token in doc if ent.start <= token.i < ent.end]
+                    if len(entity_tokens) > split_idx:  # Entity crosses split boundary
+                        logger.debug(f"Preserving location entity: {ent.text}")
+                        return True
+            
+            # 2. Check for address-like patterns using statistical analysis
+            if self._looks_like_address(text):
+                # Calculate coherence score using SciPy
+                left_part = ' '.join([t.text for t in tokens[:split_idx]])
+                right_part = ' '.join([t.text for t in tokens[split_idx:]])
+                
+                # If splitting creates two address-like parts, check semantic coherence
+                left_complexity = self._calculate_text_complexity(left_part)
+                right_complexity = self._calculate_text_complexity(right_part)
+                
+                # Address parts should have balanced complexity
+                complexity_balance = min(left_complexity, right_complexity) / max(left_complexity, right_complexity)
+                
+                # If one part has very low complexity compared to the other, preserve
+                if complexity_balance < 0.3:
+                    logger.debug(f"Preserving address due to unbalanced split complexity: {complexity_balance:.2f}")
+                    return True
+                
+                # Check if the split creates fragments that are too short for addresses
+                if len(left_part) < 8 or len(right_part) < 8:
+                    logger.debug(f"Preserving address - split parts too short: '{left_part}' | '{right_part}'")
+                    return True
+            
+            # 3. Check for multi-word proper nouns that should stay together
+            proper_noun_spans = []
+            for token in doc:
+                if token.pos_ == 'PROPN':
+                    proper_noun_spans.append(token.i)
+            
+            # If split point is in the middle of consecutive proper nouns, preserve
+            if split_idx in proper_noun_spans and (split_idx - 1) in proper_noun_spans:
+                logger.debug(f"Preserving proper noun sequence across split point {split_idx}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Coherence preservation check error: {e}")
+            return False
+    
+    def _find_complete_address_for_key(self, key_block: TextBlock, all_blocks: List[TextBlock], 
+                                     current_block: TextBlock) -> str:
+        """
+        Find and combine split address parts when pairing with an Address key
+        """
+        try:
+            # Look for other blocks that might be parts of the same address
+            address_parts = [current_block.text]
+            current_bbox = current_block.bbox
+            
+            # Find nearby blocks that could be address continuations
+            for block in all_blocks:
+                if block == current_block or block == key_block:
+                    continue
+                
+                # Check if block is spatially close (same line or nearby)
+                horizontal_distance = abs(current_bbox.center_x - block.bbox.center_x)
+                vertical_distance = abs(current_bbox.center_y - block.bbox.center_y)
+                
+                # Consider blocks on the same line or very close vertically
+                if (vertical_distance <= max(current_bbox.height, block.bbox.height) * 1.2 and
+                    horizontal_distance <= 400):  # Reasonable horizontal distance
+                    
+                    # Check if this looks like it could be part of an address
+                    if (self._looks_like_address_fragment(block.text) or 
+                        self._could_be_address_continuation(current_block.text, block.text)):
+                        
+                        # Determine order based on position
+                        if block.bbox.x < current_bbox.x:
+                            address_parts.insert(0, block.text)
+                        else:
+                            address_parts.append(block.text)
+                        
+                        logger.debug(f"Found address part: '{block.text}' for address combination")
+            
+            # Only combine if we found additional parts
+            if len(address_parts) > 1:
+                combined = ' '.join(address_parts)
+                # Validate the combined address makes sense
+                if self._looks_like_address(combined) and len(combined) > len(current_block.text):
+                    return combined
+            
+            return current_block.text  # Return original if no combination found
+            
+        except Exception as e:
+            logger.debug(f"Address combination error: {e}")
+            return current_block.text
+    
+    def _looks_like_address_fragment(self, text: str) -> bool:
+        """
+        Check if text looks like it could be part of an address using NLP
+        """
+        try:
+            if not self.nlp:
+                return False
+            
+            doc = self.nlp(text)
+            
+            # 1. Check for location/facility entities
+            location_entities = [ent for ent in doc.ents if ent.label_ in ['GPE', 'LOC', 'FAC']]
+            if location_entities:
+                return True
+            
+            # 2. Statistical analysis of text patterns
+            # Address fragments often have mixed content (numbers + text)
+            has_numbers = any(char.isdigit() for char in text)
+            has_alpha = any(char.isalpha() for char in text)
+            
+            if has_numbers and has_alpha:
+                # Check text complexity - addresses have moderate complexity
+                complexity = self._calculate_text_complexity(text)
+                if 0.3 <= complexity <= 0.8:
+                    return True
+            
+            # 3. Check for postal code patterns (universal pattern)
+            if re.search(r'\b\d{5}(-\d{4})?\b', text):
+                return True
+            
+            # 4. Use NLP POS patterns - addresses often have specific patterns
+            pos_pattern = [token.pos_ for token in doc]
+            
+            # Common address patterns: NUM + NOUN, PROPN + NOUN, etc.
+            if len(pos_pattern) >= 2:
+                for i in range(len(pos_pattern) - 1):
+                    if (pos_pattern[i] == 'NUM' and pos_pattern[i+1] in ['NOUN', 'PROPN']) or \
+                       (pos_pattern[i] == 'PROPN' and pos_pattern[i+1] == 'NOUN'):
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Address fragment detection error: {e}")
+            return False
+    
+    def _could_be_address_continuation(self, part1: str, part2: str) -> bool:
+        """
+        Check if two text parts could be continuations of the same address
+        """
+        try:
+            if not self.nlp:
+                return False
+            
+            # Combine and check if it forms a coherent address
+            combined = f"{part1} {part2}"
+            
+            if self._looks_like_address(combined):
+                # Check semantic coherence
+                doc = self.nlp(combined)
+                location_entities = [ent for ent in doc.ents if ent.label_ in ['GPE', 'LOC', 'FAC']]
+                
+                # If combining creates more location entities, it's likely a good combination
+                doc1 = self.nlp(part1)
+                doc2 = self.nlp(part2)
+                entities1 = len([ent for ent in doc1.ents if ent.label_ in ['GPE', 'LOC', 'FAC']])
+                entities2 = len([ent for ent in doc2.ents if ent.label_ in ['GPE', 'LOC', 'FAC']])
+                
+                if len(location_entities) >= max(entities1, entities2):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Address continuation check error: {e}")
+            return False
 
 class DocumentProcessor:
     """Main document processing orchestrator with enhanced key-value extraction"""

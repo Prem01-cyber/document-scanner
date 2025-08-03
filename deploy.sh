@@ -1170,6 +1170,7 @@ show_usage() {
     echo "  dev                - Start hybrid development server"
     echo "  docker             - Deploy with Docker (single container)"
     echo "  production         - Deploy with Docker + Nginx (production ready)"
+    echo "  gradio             - Launch Gradio UI interface"
     echo ""
     echo "MANAGEMENT COMMANDS:"
     echo "  stop               - Stop all services (dev server, Docker containers)"
@@ -1227,13 +1228,30 @@ stop_services() {
         rm -f logs/dev.pid
     fi
     
+    # Stop Gradio interface using PID file
+    if [ -f "logs/gradio.pid" ]; then
+        GRADIO_PID=$(cat logs/gradio.pid)
+        if ps -p $GRADIO_PID > /dev/null 2>&1; then
+            kill $GRADIO_PID 2>/dev/null || true
+            sleep 3
+            # Force kill if still running
+            if ps -p $GRADIO_PID > /dev/null 2>&1; then
+                kill -9 $GRADIO_PID 2>/dev/null || true
+            fi
+            log_info "✅ Gradio interface stopped (PID: $GRADIO_PID)"
+        fi
+        rm -f logs/gradio.pid
+    fi
+    
     # Stop any remaining processes
     pkill -f "python.*hybrid_api_app.py" 2>/dev/null || true
     pkill -f "uvicorn.*hybrid_api_app" 2>/dev/null || true
+    pkill -f "python.*gradio_app.py" 2>/dev/null || true
     
     # Free ports
     lsof -ti:8000 | xargs kill -9 2>/dev/null || true
     lsof -ti:80 | xargs kill -9 2>/dev/null || true
+    lsof -ti:7860 | xargs kill -9 2>/dev/null || true
     
     log_success "✅ All services stopped"
 }
@@ -1260,6 +1278,9 @@ restart_services() {
                 ;;
             hybrid_production)
                 deploy_hybrid_production
+                ;;
+            gradio)
+                launch_gradio_interface
                 ;;
             *)
                 log_warn "Unknown deployment mode: $DEPLOY_MODE"
@@ -1343,6 +1364,89 @@ show_logs() {
     fi
 }
 
+launch_gradio_interface() {
+    log_info "🎨 Launching Gradio UI Interface..."
+    
+    source .venv/bin/activate
+    
+    # Check if gradio is installed
+    if ! python3 -c "import gradio" 2>/dev/null; then
+        log_warn "Gradio not found. Installing..."
+        pip install gradio==4.44.1 aiofiles==23.2.0 ffmpy==0.3.1 orjson==3.9.15
+    fi
+    
+    # Check if gradio_app.py exists
+    if [ ! -f "gradio_app.py" ]; then
+        log_error "gradio_app.py not found!"
+        log_info "This file contains the modern Gradio interface for the hybrid document scanner."
+        exit 1
+    fi
+    
+    # Check if port 7860 is already in use
+    if lsof -Pi :7860 -sTCP:LISTEN -t >/dev/null 2>&1; then
+        log_warn "Port 7860 is already in use. Stopping existing processes..."
+        lsof -ti:7860 | xargs kill -9 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Create logs directory
+    mkdir -p logs
+    
+    # Start the Gradio interface
+    log_info "Starting modern Gradio interface on port 7860..."
+    nohup python3 gradio_app.py > logs/gradio.log 2>&1 &
+    GRADIO_PID=$!
+    
+    # Save deployment info
+    echo "gradio" > logs/deploy_mode.txt
+    echo $GRADIO_PID > logs/gradio.pid
+    
+    # Wait for interface to start
+    log_info "Waiting for Gradio interface to initialize..."
+    sleep 8
+    
+    # Test if interface is responding
+    max_attempts=10
+    attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        if curl -f http://localhost:7860 > /dev/null 2>&1; then
+            break
+        fi
+        log_info "Attempt $attempt/$max_attempts: waiting for interface..."
+        sleep 3
+        attempt=$((attempt + 1))
+    done
+    
+    if curl -f http://localhost:7860 > /dev/null 2>&1; then
+        log_success "✅ Gradio interface started successfully!"
+        echo ""
+        echo "🎨 Gradio UI running at: http://localhost:7860"
+        echo "📱 Interface features:"
+        echo "   • Upload documents for processing"
+        echo "   • Visual bounding box overlay"
+        echo "   • Real-time extraction results"
+        echo "   • Strategy comparison tools"
+        echo "   • Interactive confidence tuning"
+        echo ""
+        echo "🔧 Controls:"
+        echo "   • Upload images via drag & drop"
+        echo "   • Adjust extraction strategies"
+        echo "   • Tune confidence thresholds"
+        echo "   • Toggle OCR block visualization"
+        echo ""
+        echo "📋 Logs: tail -f logs/gradio.log"
+        echo "🆔 Process ID: $GRADIO_PID"
+        echo "🛑 Stop: ./deploy.sh stop"
+    else
+        log_error "❌ Gradio interface failed to start"
+        if ps -p $GRADIO_PID > /dev/null 2>&1; then
+            kill $GRADIO_PID 2>/dev/null || true
+        fi
+        log_error "Check logs: tail -50 logs/gradio.log"
+        exit 1
+    fi
+}
+
 # Main execution
 main() {
     case "${1:-}" in
@@ -1380,6 +1484,9 @@ main() {
             ;;
         demo)
             run_hybrid_demo
+            ;;
+        gradio)
+            launch_gradio_interface
             ;;
         stop)
             stop_services

@@ -94,14 +94,40 @@ class LLMKeyValueExtractor:
         try:
             import requests
             # Test if Ollama is running
-            response = requests.get("http://localhost:11434/api/tags", timeout=2)
+            response = requests.get("http://localhost:11434/api/tags", timeout=5)
             if response.status_code == 200:
-                self.available_providers[LLMProvider.OLLAMA] = {
-                    "base_url": "http://localhost:11434",
-                    "model": "llama3.1:8b",  # Good balance of speed and capability
-                    "backup_model": "mistral:7b"
-                }
-                logger.info("Ollama provider initialized")
+                # Get available models
+                models_data = response.json()
+                available_models = [model['name'] for model in models_data.get('models', [])]
+                
+                # Choose best available model
+                preferred_models = ["llama3.1:8b", "llama3:8b", "llama2:7b", "mistral:7b", "codellama:7b"]
+                selected_model = None
+                backup_model = None
+                
+                for model in preferred_models:
+                    if model in available_models:
+                        if selected_model is None:
+                            selected_model = model
+                        elif backup_model is None:
+                            backup_model = model
+                            break
+                
+                if selected_model:
+                    config = {
+                        "base_url": "http://localhost:11434",
+                        "model": selected_model,
+                        "available_models": available_models
+                    }
+                    if backup_model:
+                        config["backup_model"] = backup_model
+                    
+                    self.available_providers[LLMProvider.OLLAMA] = config
+                    logger.info(f"Ollama provider initialized with model: {selected_model}")
+                else:
+                    logger.warning("Ollama is running but no suitable models found. Available models: " + str(available_models))
+            else:
+                logger.debug(f"Ollama not available: HTTP {response.status_code}")
         except Exception as e:
             logger.debug(f"Ollama initialization failed: {e}")
         

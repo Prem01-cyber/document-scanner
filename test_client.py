@@ -229,21 +229,26 @@ def print_scan_result(result: dict):
             print(f"      Likely Split Blocks: {len(split_blocks)} 🔄")
             print(f"      Total Blocks: {len(text_blocks)}")
         
-        # Show specific patterns we're looking for
-        target_patterns = ["Last Name", "First Name", "Nationality", "Leverling", "Janet", "Puerto Rico"]
-        found_patterns = []
-        for pattern in target_patterns:
-            for block in text_blocks:
-                if pattern.lower() in block['text'].lower():
-                    found_patterns.append(f"'{pattern}' in '{block['text']}'")
-                    break
+        # Analyze block patterns dynamically
+        form_field_patterns = []
+        value_patterns = []
         
-        if found_patterns:
-            print(f"\n🎯 Target Patterns Found:")
-            for pattern in found_patterns:
-                print(f"      ✅ {pattern}")
+        for block in text_blocks:
+            text = block['text']
+            # Look for title case patterns that might be form fields
+            if text.istitle() and len(text.split()) <= 3 and block['confidence'] >= 0.95:
+                form_field_patterns.append(text)
+            elif text.istitle() and len(text.split()) <= 2 and block['confidence'] >= 0.90:
+                value_patterns.append(text)
+        
+        if form_field_patterns or value_patterns:
+            print(f"\n🎯 Pattern Analysis:")
+            if form_field_patterns:
+                print(f"      📋 Potential Form Fields: {', '.join(form_field_patterns[:3])}{'...' if len(form_field_patterns) > 3 else ''}")
+            if value_patterns:
+                print(f"      📝 Potential Values: {', '.join(value_patterns[:3])}{'...' if len(value_patterns) > 3 else ''}")
         else:
-            print(f"\n❌ No target patterns found in text blocks")
+            print(f"\n❌ No recognizable form patterns found")
         
         # Enhanced key-value pairs display
         kv_pairs = result.get('key_value_pairs', [])
@@ -259,11 +264,13 @@ def print_scan_result(result: dict):
                 print(f"   • Check if text splitting is working correctly")
                 print(f"   • Look for server console output showing splitting process")
                 
-                # Check if we have the expected combined blocks
+                # Check if we have potential combined blocks (form field + value patterns)
                 combined_blocks = [block for block in text_blocks if 
-                                 any(pattern in block['text'] for pattern in ['Last Name', 'First Name', 'Nationality'])]
+                                 len(block['text'].split()) >= 2 and 
+                                 block['text'].istitle() and
+                                 block['confidence'] >= 0.95]
                 if combined_blocks:
-                    print(f"   • Found {len(combined_blocks)} blocks with form field names")
+                    print(f"   • Found {len(combined_blocks)} blocks with potential form field patterns")
                     print(f"   • These should be getting split automatically")
         else:
             for i, kv in enumerate(kv_pairs, 1):
@@ -421,10 +428,11 @@ def main():
         print("• Confidence scores indicating split vs original blocks")
         print("• Extraction method details in key-value pairs")
         
-        print("\n🎯 Target Test Case:")
-        print("Input blocks like 'Last Name Leverling' should split into:")
-        print("• 'Last Name' (key) + 'Leverling' (value)")
-        print("• This creates a key-value pair automatically")
+        print("\n🎯 Dynamic Processing:")
+        print("Text blocks containing form fields + values get intelligently split using:")
+        print("• NLP analysis for semantic understanding")
+        print("• POS tagging to identify label vs value patterns")  
+        print("• Spatial analysis for accurate key-value pairing")
         
         print("\n💡 Troubleshooting Steps:")
         print("1. Restart the server to load new debug code")
@@ -555,13 +563,13 @@ def interactive_mode():
             print("   • If no splitting output appears, restart the server")
             print("   • Check server console/terminal for detailed logs")
             print("   • Confidence values 0.95/0.90 indicate split blocks")
-            print("   • Manual splits handle exact patterns like 'Last Name Leverling'")
+            print("   • Intelligent splitting uses NLP for dynamic pattern recognition")
             
             print("\n💡 Expected Behavior:")
-            print("   • 'Last Name Leverling' should split into 'Last Name' + 'Leverling'")
-            print("   • 'First Name Janet' should split into 'First Name' + 'Janet'") 
-            print("   • 'Nationality Puerto Rico' should split into 'Nationality' + 'Puerto Rico'")
-            print("   • These splits should then create key-value pairs automatically")
+            print("   • Combined text blocks like 'Field Name Value' should split into 'Field Name' + 'Value'")
+            print("   • NLP analysis identifies form field labels vs values using POS tagging") 
+            print("   • Spatial proximity and confidence scoring pair split blocks correctly")
+            print("   • Dynamic pattern learning adapts to any document type automatically")
             
         elif choice == "5":
             print("👋 Goodbye!")

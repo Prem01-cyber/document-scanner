@@ -161,33 +161,143 @@ def print_scan_result(result: dict):
         print(f"   Client: {result.get('client_processing_time', 0):.2f}s")
         print(f"   Text Blocks: {result.get('text_blocks_count', 0)}")
         
-        # Always show extracted text blocks
+        # Show enhanced splitting statistics
+        extraction_stats = result.get('extraction_statistics', {})
+        if extraction_stats:
+            print(f"\n🔄 Hybrid Text Analysis Results:")
+            print(f"   Original OCR Blocks: {extraction_stats.get('original_ocr_blocks', 0)}")
+            
+            pairs_from_splitting = extraction_stats.get('pairs_from_splitting', 0)
+            if pairs_from_splitting > 0:
+                print(f"   ✅ Pairs from Text Splitting: {pairs_from_splitting}")
+                print(f"   🎯 Splitting Success Rate: {(pairs_from_splitting / max(1, extraction_stats.get('original_ocr_blocks', 1))) * 100:.1f}%")
+            else:
+                print(f"   ❌ No pairs from text splitting")
+                
+            print(f"   📊 Total Pairs Extracted: {extraction_stats.get('identified_key_value_pairs', 0)}")
+            
+            # Show extraction methods used
+            methods_used = extraction_stats.get('extraction_methods_used', [])
+            if methods_used:
+                print(f"   🔧 Extraction Methods: {', '.join(methods_used[:3])}{'...' if len(methods_used) > 3 else ''}")
+            
+            avg_confidence = extraction_stats.get('average_confidence', 0)
+            if avg_confidence > 0:
+                print(f"   📈 Average Confidence: {avg_confidence:.2f}")
+                
+        # Debugging hint for server logs
+        if result.get('text_blocks_count', 0) > 0 and extraction_stats.get('identified_key_value_pairs', 0) == 0:
+            print(f"\n🔧 Debugging Tips:")
+            print(f"   • Check server console/logs for detailed splitting output")
+            print(f"   • Look for '=== STARTING TEXT BLOCK SPLITTING ===' messages")
+            print(f"   • Text blocks detected but no pairs extracted - check splitting logic")
+        
+        # Enhanced display of extracted text blocks with splitting indicators
         text_blocks = result.get('extracted_text_blocks', [])
         print(f"\n📝 All Extracted Text Blocks ({len(text_blocks)}):")
+        
+        # Categorize blocks by confidence to show which might be from splitting
+        original_blocks = []
+        split_blocks = []
+        
         for i, block in enumerate(text_blocks, 1):
+            # Blocks with confidence 0.95 are likely from keyword splitting
+            # Blocks with confidence 0.90 are likely split values
+            is_likely_split = block['confidence'] in [0.95, 0.90]
+            
             # Truncate long text for readability
             display_text = block['text'][:100] + '...' if len(block['text']) > 100 else block['text']
-            print(f"   {i}. \"{display_text}\"")
+            
+            # Add indicators for split blocks
+            split_indicator = " 🔄" if is_likely_split else ""
+            
+            print(f"   {i}. \"{display_text}\"{split_indicator}")
             print(f"      Box: ({block['bbox']['x']}, {block['bbox']['y']}) "
                   f"{block['bbox']['width']}×{block['bbox']['height']}")
             print(f"      Confidence: {block['confidence']:.2f}")
+            
+            if is_likely_split:
+                split_blocks.append(block)
+            else:
+                original_blocks.append(block)
             print()
         
-        # Key-value pairs
+        # Show splitting analysis
+        if len(split_blocks) > 0:
+            print(f"   📊 Block Analysis:")
+            print(f"      Original OCR Blocks: {len(original_blocks)}")
+            print(f"      Likely Split Blocks: {len(split_blocks)} 🔄")
+            print(f"      Total Blocks: {len(text_blocks)}")
+        
+        # Show specific patterns we're looking for
+        target_patterns = ["Last Name", "First Name", "Nationality", "Leverling", "Janet", "Puerto Rico"]
+        found_patterns = []
+        for pattern in target_patterns:
+            for block in text_blocks:
+                if pattern.lower() in block['text'].lower():
+                    found_patterns.append(f"'{pattern}' in '{block['text']}'")
+                    break
+        
+        if found_patterns:
+            print(f"\n🎯 Target Patterns Found:")
+            for pattern in found_patterns:
+                print(f"      ✅ {pattern}")
+        else:
+            print(f"\n❌ No target patterns found in text blocks")
+        
+        # Enhanced key-value pairs display
         kv_pairs = result.get('key_value_pairs', [])
-        print(f"🔑 Extracted Key-Value Pairs ({len(kv_pairs)}):")
+        print(f"\n🔑 Extracted Key-Value Pairs ({len(kv_pairs)}):")
         
         if not kv_pairs:
-            print("   No key-value pairs found")
+            print("   ❌ No key-value pairs found")
+            
+            # If we have text blocks but no pairs, provide more analysis
+            if len(text_blocks) > 0:
+                print(f"\n💡 Analysis:")
+                print(f"   • {len(text_blocks)} text blocks were detected")
+                print(f"   • Check if text splitting is working correctly")
+                print(f"   • Look for server console output showing splitting process")
+                
+                # Check if we have the expected combined blocks
+                combined_blocks = [block for block in text_blocks if 
+                                 any(pattern in block['text'] for pattern in ['Last Name', 'First Name', 'Nationality'])]
+                if combined_blocks:
+                    print(f"   • Found {len(combined_blocks)} blocks with form field names")
+                    print(f"   • These should be getting split automatically")
         else:
             for i, kv in enumerate(kv_pairs, 1):
-                print(f"   {i}. {kv['key']} → {kv['value']}")
+                # Add method indicator
+                method = kv.get('extraction_method', '')
+                method_indicator = ""
+                if 'split' in method.lower():
+                    method_indicator = " 🔄"
+                elif 'manual' in method.lower():
+                    method_indicator = " 🎯"
+                elif 'spatial' in method.lower():
+                    method_indicator = " 📍"
+                
+                print(f"   {i}. {kv['key']} → {kv['value']}{method_indicator}")
                 print(f"      Confidence: {kv['confidence']:.2f}")
+                
+                # Show extraction method if available
+                if method:
+                    # Simplify method display
+                    simplified_method = method.replace('|', ' | ').replace('_', ' ').title()
+                    print(f"      Method: {simplified_method}")
+                
                 print(f"      Key Box: ({kv['key_bbox']['x']}, {kv['key_bbox']['y']}) "
                       f"{kv['key_bbox']['width']}×{kv['key_bbox']['height']}")
                 print(f"      Value Box: ({kv['value_bbox']['x']}, {kv['value_bbox']['y']}) "
                       f"{kv['value_bbox']['width']}×{kv['value_bbox']['height']}")
                 print()
+            
+            # Summary of extraction methods
+            if len(kv_pairs) > 1:
+                methods = [kv.get('extraction_method', '') for kv in kv_pairs]
+                split_methods = sum(1 for m in methods if 'split' in m.lower())
+                if split_methods > 0:
+                    print(f"   📊 Summary: {split_methods}/{len(kv_pairs)} pairs from text splitting")
 
 def print_batch_summary(results: list):
     """Print summary of batch processing"""
@@ -214,8 +324,8 @@ def print_batch_summary(results: list):
             print(f"   ⏱️  Avg Processing Time: {avg_time:.2f}s")
 
 def main():
-    parser = argparse.ArgumentParser(description="Document Scanner API Test Client")
-    parser.add_argument("command", choices=["health", "quality", "scan", "batch"],
+    parser = argparse.ArgumentParser(description="Document Scanner API Test Client with Enhanced Debugging")
+    parser.add_argument("command", choices=["health", "quality", "scan", "batch", "debug"],
                        help="Command to execute")
     parser.add_argument("--url", default="http://localhost:8000",
                        help="API base URL")
@@ -224,6 +334,8 @@ def main():
     parser.add_argument("--output", help="Output JSON file path")
     parser.add_argument("--verbose", "-v", action="store_true", 
                        help="Verbose output including all extracted text")
+    parser.add_argument("--debug", "-d", action="store_true",
+                       help="Show debug information and troubleshooting tips")
     
     args = parser.parse_args()
     
@@ -296,6 +408,36 @@ def main():
             with open(args.output, 'w') as f:
                 json.dump(results, f, indent=2)
             print(f"💾 Batch results saved to: {args.output}")
+    
+    elif args.command == "debug":
+        print("\n🔧 Document Scanner Debug Information")
+        print("="*60)
+        print("Enhanced debugging features have been added to help troubleshoot")
+        print("text splitting and key-value extraction issues.")
+        
+        print("\n📊 What to Look For:")
+        print("• Server console output showing text block splitting process")
+        print("• Manual split detection for common form patterns") 
+        print("• Confidence scores indicating split vs original blocks")
+        print("• Extraction method details in key-value pairs")
+        
+        print("\n🎯 Target Test Case:")
+        print("Input blocks like 'Last Name Leverling' should split into:")
+        print("• 'Last Name' (key) + 'Leverling' (value)")
+        print("• This creates a key-value pair automatically")
+        
+        print("\n💡 Troubleshooting Steps:")
+        print("1. Restart the server to load new debug code")
+        print("2. Check server console for splitting messages")
+        print("3. Look for confidence values 0.95 and 0.90 (split blocks)")
+        print("4. Use interactive mode (no args) for best debugging experience")
+        
+        if args.debug:
+            print("\n🔍 Extended Debug Mode Active")
+            print("Run 'scan' command with --debug for additional output")
+            
+        print(f"\n🌐 API URL: {args.url}")
+        print("💡 Use interactive mode for step-by-step debugging")
 
 # Interactive mode functions
 def interactive_mode():
@@ -317,9 +459,10 @@ def interactive_mode():
         print("1. Quality check")
         print("2. Scan document") 
         print("3. Batch process")
-        print("4. Exit")
+        print("4. Debug mode info")
+        print("5. Exit")
         
-        choice = input("\nEnter choice (1-4): ").strip()
+        choice = input("\nEnter choice (1-5): ").strip()
         
         if choice == "1":
             image_path = input("Enter image path: ").strip()
@@ -350,6 +493,25 @@ def interactive_mode():
                     print("   • Check server logs for detailed error information")
                     print("   • Ensure all dependencies are properly installed")
                     print("   • Try a different image format if the issue persists")
+                
+                # Enhanced debugging for splitting issues
+                elif (result.get('status') == 'success' and 
+                      result.get('text_blocks_count', 0) > 0 and 
+                      result.get('extraction_statistics', {}).get('identified_key_value_pairs', 0) == 0):
+                    
+                    print("\n🔧 Enhanced Debugging Recommendations:")
+                    print("   • Server console should show '=== STARTING TEXT BLOCK SPLITTING ==='")
+                    print("   • Look for manual split messages like '🎯 MANUAL TEST: Splitting...'")
+                    print("   • If no splitting messages appear, the extraction pipeline may not be called")
+                    print("   • Check server restart - new debug code may not be loaded")
+                    
+                    debug_choice = input("\n   Want to see server logs tip? (y/n): ").strip().lower()
+                    if debug_choice == 'y':
+                        print("\n📋 To see server debug output:")
+                        print("   1. Check your server terminal/console window")
+                        print("   2. Look for detailed splitting output with exact text matches")
+                        print("   3. If using Docker: docker logs <container_name>")
+                        print("   4. If no debug output appears, restart the server to load new code")
             else:
                 print("❌ File not found")
                 
@@ -374,6 +536,34 @@ def interactive_mode():
                 print("❌ Folder not found")
                 
         elif choice == "4":
+            print("\n🔧 Debug Mode Information:")
+            print("="*50)
+            print("The document scanner now includes enhanced debugging features:")
+            print("\n📊 Server-Side Debug Output:")
+            print("   • Text block splitting process is logged to server console")
+            print("   • Look for '=== STARTING TEXT BLOCK SPLITTING ===' messages")
+            print("   • Manual splitting attempts show '🎯 MANUAL TEST' messages")
+            print("   • Each splitting strategy is logged with success/failure")
+            
+            print("\n🔍 Client-Side Enhancements:")
+            print("   • Split blocks are marked with 🔄 indicators")
+            print("   • Extraction methods show how pairs were found")
+            print("   • Target pattern analysis shows what text was detected")
+            print("   • Enhanced statistics show splitting success rate")
+            
+            print("\n🛠️  Troubleshooting:")
+            print("   • If no splitting output appears, restart the server")
+            print("   • Check server console/terminal for detailed logs")
+            print("   • Confidence values 0.95/0.90 indicate split blocks")
+            print("   • Manual splits handle exact patterns like 'Last Name Leverling'")
+            
+            print("\n💡 Expected Behavior:")
+            print("   • 'Last Name Leverling' should split into 'Last Name' + 'Leverling'")
+            print("   • 'First Name Janet' should split into 'First Name' + 'Janet'") 
+            print("   • 'Nationality Puerto Rico' should split into 'Nationality' + 'Puerto Rico'")
+            print("   • These splits should then create key-value pairs automatically")
+            
+        elif choice == "5":
             print("👋 Goodbye!")
             break
         else:

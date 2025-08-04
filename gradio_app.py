@@ -15,6 +15,10 @@ from typing import List, Dict, Optional, Tuple
 import logging
 from datetime import datetime
 import traceback
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from hybrid_document_processor import HybridDocumentProcessor
 from hybrid_kv_extractor import ExtractionStrategy
@@ -145,8 +149,11 @@ class DocumentProcessor:
                 return self._create_error_response(f"Invalid strategy: {strategy}")
             
             # Process document
+            logger.info(f"🔄 Processing document with strategy: {strategy}, provider: {llm_provider}")
             result = self.processor.process_image_bytes(image_bytes, "document")
             processing_time = time.time() - start_time
+            
+            logger.info(f"✅ Document processing completed in {processing_time:.2f}s")
             
             # Update processing time average
             total_time = self.stats["avg_processing_time"] * (self.stats["total_processed"] - 1) + processing_time
@@ -356,15 +363,13 @@ def create_modern_interface():
             return (
                 result["image"],
                 result["table"], 
-                result["summary"],
-                result["status"]
+                result["summary"]
             )
         else:
             return (
                 None,
                 [],
-                result["summary"], 
-                result["status"]
+                result["summary"]
             )
     
     def get_status():

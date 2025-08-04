@@ -8,6 +8,10 @@ from typing import Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from hybrid_document_processor import HybridDocumentProcessor
 from hybrid_kv_extractor import ExtractionStrategy

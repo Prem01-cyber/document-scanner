@@ -5,9 +5,14 @@ import json
 import re
 import os
 import logging
+import traceback
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -63,17 +68,27 @@ class LLMKeyValueExtractor:
         # OpenAI
         try:
             if os.getenv("OPENAI_API_KEY"):
+                logger.info(f"OPENAI_API_KEY found: {os.getenv('OPENAI_API_KEY')[:10]}...")
                 import openai
+                logger.info(f"OpenAI package imported successfully, version: {openai.__version__}")
+                
+                # Initialize OpenAI client with correct parameters for v1.54.4
+                client = openai.OpenAI(
+                    api_key=os.getenv("OPENAI_API_KEY")
+                )
+                logger.info("OpenAI client created successfully")
                 self.available_providers[LLMProvider.OPENAI] = {
-                    "client": openai.OpenAI(),
+                    "client": client,
                     "model": "gpt-4o-mini",  # Cost-effective for extraction
                     "backup_model": "gpt-3.5-turbo"
                 }
-                logger.info("OpenAI provider initialized")
-        except ImportError:
-            logger.debug("OpenAI not available - install: pip install openai")
+                logger.info("✅ OpenAI provider initialized successfully")
+            else:
+                logger.warning("OPENAI_API_KEY not found in environment")
+        except ImportError as e:
+            logger.error(f"OpenAI not available - install: pip install openai. Error: {e}")
         except Exception as e:
-            logger.debug(f"OpenAI initialization failed: {e}")
+            logger.error(f"OpenAI initialization failed: {e}")
         
         # Anthropic Claude
         try:
@@ -149,7 +164,13 @@ class LLMKeyValueExtractor:
             logger.debug(f"Azure OpenAI initialization failed: {e}")
         
         if not self.available_providers:
-            logger.warning("No LLM providers available! Set API keys or run Ollama locally.")
+            logger.warning("❌ No LLM providers available! Set API keys or run Ollama locally.")
+        else:
+            logger.info(f"✅ LLM providers initialized: {list(self.available_providers.keys())}")
+            
+        logger.info(f"📊 Final provider summary: {len(self.available_providers)} providers available")
+        for provider, config in self.available_providers.items():
+            logger.info(f"   - {provider.value}: {config.get('model', 'unknown model')}")
     
     def build_extraction_prompt(self, text: str, document_type: str = "document") -> str:
         """
@@ -185,19 +206,27 @@ JSON OUTPUT:"""
         Extract key-value pairs using LLM with provider fallback
         """
         if not text.strip():
+            logger.warning("⚠️  Empty text provided to LLM extraction")
             return []
         
         self.extraction_stats["total_requests"] += 1
         
+        logger.info(f"🤖 Starting LLM extraction (request #{self.extraction_stats['total_requests']})")
+        logger.info(f"📝 Text length: {len(text)} chars")
+        logger.info(f"📋 Document type: {document_type}")
+        logger.info(f"🔧 Available providers: {list(self.available_providers.keys())}")
+        
         # Try providers in order of preference
         providers_to_try = [self.primary_provider] + self.fallback_providers
+        logger.info(f"🔄 Provider priority: {[p.value for p in providers_to_try]}")
         
         for provider in providers_to_try:
             if provider not in self.available_providers:
+                logger.debug(f"⏭️  Skipping {provider.value} - not available")
                 continue
             
             try:
-                logger.info(f"Attempting LLM extraction with {provider.value}")
+                logger.info(f"🚀 Attempting LLM extraction with {provider.value}")
                 
                 # Extract using this provider
                 result = self._extract_with_provider(provider, text, document_type)
@@ -212,14 +241,19 @@ JSON OUTPUT:"""
                          (self.extraction_stats["successful_extractions"] - 1) + len(result)) / \
                         self.extraction_stats["successful_extractions"]
                     
-                    logger.info(f"LLM extraction successful with {provider.value}: {len(result)} pairs")
+                    logger.info(f"✅ LLM extraction successful with {provider.value}: {len(result)} pairs")
+                    for i, pair in enumerate(result):
+                        logger.info(f"   {i+1}. {pair.key} → {pair.value} (conf: {pair.confidence:.2f})")
                     return result
+                else:
+                    logger.warning(f"⚠️  No pairs extracted with {provider.value}")
                     
             except Exception as e:
-                logger.warning(f"LLM extraction failed with {provider.value}: {e}")
+                logger.error(f"❌ LLM extraction failed with {provider.value}: {e}")
+                logger.debug(f"Full error: {traceback.format_exc()}")
                 continue
         
-        logger.error("All LLM providers failed for extraction")
+        logger.error("❌ All LLM providers failed for extraction")
         return []
     
     def _extract_with_provider(self, provider: LLMProvider, text: str, document_type: str) -> List[LLMKeyValuePair]:

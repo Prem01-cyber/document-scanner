@@ -3,18 +3,168 @@
 
 import cv2
 import numpy as np
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import logging
+import os
 from config import adaptive_config
+
+# ML model imports (with fallback)
+try:
+    import joblib
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    joblib = None
 
 logger = logging.getLogger(__name__)
 
 class AdaptiveDocumentQualityChecker:
     """Fully adaptive document quality assessment with learning capabilities"""
     
-    def __init__(self):
+    def __init__(self, ml_model_path: str = "quality_rescan_model.pkl"):
         # No more hardcoded values - everything comes from adaptive config
-        pass
+        self.ml_model_path = ml_model_path
+        self.ml_model_data = None
+        self._load_ml_model()
+    
+    def _load_ml_model(self) -> bool:
+        """Load ML model if available"""
+        if not ML_AVAILABLE:
+            logger.warning("ML dependencies not available. Only rule-based scoring will be used.")
+            return False
+            
+        if not os.path.exists(self.ml_model_path):
+            logger.info(f"ML model not found at {self.ml_model_path}. Only rule-based scoring will be used.")
+            return False
+            
+        try:
+            self.ml_model_data = joblib.load(self.ml_model_path)
+            logger.info(f"Loaded ML model: {self.ml_model_data.get('model_type', 'unknown')}")
+            logger.info(f"Model performance: ROC AUC = {self.ml_model_data.get('performance', {}).get('roc_auc', 'unknown')}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load ML model: {e}")
+            self.ml_model_data = None
+            return False
+    
+    def predict_rescan_with_ml(self, metrics: Dict) -> Tuple[Optional[int], Optional[float], str]:
+        """Predict rescan need using ML model
+        
+        Returns:
+            (prediction, probability, status)
+            - prediction: 0 or 1, None if model unavailable
+            - probability: probability of needing rescan, None if model unavailable  
+            - status: "success", "model_unavailable", "prediction_error"
+        """
+        if not self.ml_model_data:
+            return None, None, "model_unavailable"
+            
+        try:
+            model = self.ml_model_data['model']
+            scaler = self.ml_model_data.get('scaler')
+            feature_columns = self.ml_model_data['feature_columns']
+            
+            # Extract features in correct order
+            features = []
+            for col in feature_columns:
+                if col == "brightness_issue":
+                    features.append(int(metrics.get(col, False)))
+                else:
+                    features.append(metrics.get(col, 0.0))
+            
+            # Convert to numpy array
+            X = np.array(features).reshape(1, -1)
+            
+            # Apply scaling if needed (for logistic regression)
+            if scaler is not None:
+                X = scaler.transform(X)
+            
+            # Predict
+            probability = model.predict_proba(X)[0][1]  # Probability of class 1 (needs rescan)
+            prediction = int(probability > 0.5)
+            
+            return prediction, float(probability), "success"
+            
+        except Exception as e:
+            logger.error(f"ML prediction error: {e}")
+            return None, None, "prediction_error"
+    
+    def compute_quality_risk_score(self, metrics: Dict, weights: Dict = None, document_type: str = "general") -> Tuple[float, List[str], str]:
+        """
+        Compute a final quality risk score from various quality metrics.
+        Args:
+            metrics: Dictionary of extracted metrics from quality checker
+            weights: Optional weights per metric. Defaults provided below.
+            document_type: Document type for adaptive weight selection
+
+        Returns:
+            (risk_score: float, issues: List[str], decision: str)
+        """
+        # Get adaptive weights if available, otherwise use defaults
+        if weights is None:
+            weights = adaptive_config.get_adaptive_value(
+                "quality_risk_weights", document_type
+            )
+            
+            # Fallback to sensible defaults if not learned yet
+            if not isinstance(weights, dict):
+                weights = {
+                    "blur_score": 0.35,
+                    "edge_cut_score": 0.25,
+                    "text_density_score": 0.2,
+                    "brightness_score": 0.1,
+                    "skew_score": 0.1
+                }
+        
+        # Normalize scores (0 = good, 1 = bad)
+        score_components = {
+            "blur_score": min(1.0, 1.0 - metrics.get("blur_confidence", 1.0)),  # Low blur confidence → high risk
+            "edge_cut_score": float(metrics.get("edge_cut_flags", 0)) / 4.0,    # Max 4 edges
+            "text_density_score": float(metrics.get("text_density_violations", 0)) / 4.0,
+            "brightness_score": 1.0 if metrics.get("brightness_issue", False) else 0.0,
+            "skew_score": 1.0 if abs(metrics.get("skew_angle", 0)) > 10 else 0.0
+        }
+        
+        # Compute weighted total score
+        total_score = sum(score_components[k] * weights.get(k, 0.0) for k in score_components)
+        
+        # Document-type specific thresholds (can be made adaptive too)
+        reject_threshold = 0.65
+        warn_threshold = 0.4
+        
+        # Adjust thresholds for document types that need higher quality
+        if document_type in ["certificate", "legal", "financial"]:
+            reject_threshold = 0.55  # More strict
+            warn_threshold = 0.35
+        elif document_type in ["receipt", "note"]:
+            reject_threshold = 0.75  # More lenient
+            warn_threshold = 0.5
+        
+        # Risk decision
+        if total_score >= reject_threshold:
+            decision = "reject"
+        elif total_score >= warn_threshold:
+            decision = "warn"
+        else:
+            decision = "accept"
+        
+        # Explanation generation
+        reasons = []
+        if score_components["blur_score"] > 0.6:
+            reasons.append("Blurry scan")
+        if score_components["edge_cut_score"] > 0.5:
+            reasons.append("Document may be cut")
+        if score_components["text_density_score"] > 0.5:
+            reasons.append("Text too close to image edges")
+        if score_components["brightness_score"] > 0.5:
+            reasons.append("Over or underexposed")
+        if score_components["skew_score"] > 0.5:
+            reasons.append("Image is skewed")
+        
+        # Log the scoring breakdown for debugging
+        logger.debug(f"Risk scoring for {document_type}: total={total_score:.3f}, components={score_components}, decision={decision}")
+        
+        return total_score, reasons, decision
     
     def detect_cut_edges(self, image: np.ndarray, contour, document_type: str = "general") -> List[str]:
         """Detect if document edges are cut off using adaptive margin thresholds"""
@@ -209,6 +359,35 @@ class AdaptiveDocumentQualityChecker:
             'adaptive_bounds_used': True
         }
     
+    def extract_quality_metrics(self, image: np.ndarray, text_blocks: Optional[List[Any]] = None, 
+                               blur_score: float = 0.0, brightness: float = 128.0, skew_angle: float = 0.0,
+                               edge_cut_issues: List[str] = None, text_density_analysis: Dict = None, 
+                               area_ratio: float = 0.85) -> Dict:
+        """Extract quality metrics in the format expected by risk scoring"""
+        edge_cut_issues = edge_cut_issues or []
+        text_density_analysis = text_density_analysis or {}
+        
+        # Normalize blur score to confidence (higher Laplacian variance = better quality)
+        blur_confidence = min(1.0, blur_score / 200.0)  # Assume 200+ is good quality
+        
+        # Count edge cut flags
+        edge_cut_flags = len(edge_cut_issues)
+        
+        # Count text density violations
+        density_violations = len(text_density_analysis.get("issues", []))
+        
+        # Determine brightness issue
+        brightness_issue = brightness < 50 or brightness > 200
+        
+        return {
+            "blur_confidence": blur_confidence,
+            "edge_cut_flags": edge_cut_flags,
+            "text_density_violations": density_violations,
+            "brightness_issue": brightness_issue,
+            "skew_angle": abs(skew_angle),
+            "document_area_ratio": area_ratio
+        }
+    
     def assess_quality(self, image: np.ndarray, text_blocks: Optional[List[Any]] = None, largest_contour: Optional[np.ndarray] = None, document_type: str = "general") -> Dict:
         """
         Adaptive document quality assessment with learned thresholds
@@ -309,6 +488,7 @@ class AdaptiveDocumentQualityChecker:
                 logger.warning(f"Contour detection failed: {contour_error}")
                 
             # 4. Adaptive Skew Detection
+            median_angle = 0.0  # Default
             try:
                 hough_threshold = max(50, int(min(gray.shape) * 0.1))
                 lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=hough_threshold)
@@ -323,6 +503,7 @@ class AdaptiveDocumentQualityChecker:
                     
                     if angles:
                         median_angle = np.median(angles)
+                        self._last_skew_angle = median_angle  # Store for risk scoring
                         
                         # Use adaptive skew tolerance (learned parameter)
                         skew_tolerance = adaptive_config.get_adaptive_value(
@@ -335,6 +516,7 @@ class AdaptiveDocumentQualityChecker:
                             
             except Exception as skew_error:
                 logger.warning(f"Skew detection failed: {skew_error}")
+                self._last_skew_angle = 0.0
                 
             # 5. Adaptive Text Content Detection
             try:
@@ -436,17 +618,46 @@ class AdaptiveDocumentQualityChecker:
             confidence_penalty = min(0.3, issue_weight)
             final_confidence = max(0.0, confidence - confidence_penalty)
             
-            # Determine rescan necessity based on urgency and confidence
-            if rescan_urgency == "high":
-                needs_rescan = True
-                final_confidence = min(final_confidence, 0.4)  # Cap confidence for critical edge issues
-            elif rescan_urgency == "medium":
-                threshold = 0.55
-                needs_rescan = final_confidence < threshold
+            # Extract quality metrics for risk scoring
+            quality_metrics = self.extract_quality_metrics(
+                image=image,
+                text_blocks=text_blocks,
+                blur_score=blur_score,
+                brightness=mean_brightness,
+                skew_angle=getattr(self, '_last_skew_angle', 0.0),  # Store from skew detection
+                edge_cut_issues=edge_cut_issues,
+                text_density_analysis=text_density_analysis,
+                area_ratio=area_ratio if 'area_ratio' in locals() else 0.85
+            )
+            
+            # Compute risk-based quality score
+            risk_score, risk_reasons, risk_decision = self.compute_quality_risk_score(
+                quality_metrics, document_type=document_type
+            )
+            
+            # Get ML prediction if available
+            ml_prediction, ml_probability, ml_status = self.predict_rescan_with_ml(quality_metrics)
+            
+            # Determine final decision (prioritize rule-based for now, but log both)
+            needs_rescan = risk_decision == "reject"
+            final_confidence = round(1.0 - risk_score, 2)
+            
+            # Update rescan reasons with risk-based analysis
+            if risk_reasons:
+                rescan_reasons.extend(risk_reasons)
+            
+            # Update urgency based on risk score
+            if risk_score >= 0.65:
+                rescan_urgency = "high"
+            elif risk_score >= 0.4:
+                rescan_urgency = "medium"
             else:
-                # Standard threshold logic
-                brightness_adjusted_threshold = 0.5 if "too_bright" in issues else 0.6
-                needs_rescan = final_confidence < brightness_adjusted_threshold
+                rescan_urgency = "low"
+            
+            # Check agreement between rule-based and ML (if available)
+            rule_vs_ml_agreement = None
+            if ml_prediction is not None:
+                rule_vs_ml_agreement = (ml_prediction == int(needs_rescan))
             
             result = {
                 "needs_rescan": bool(needs_rescan),
@@ -487,7 +698,21 @@ class AdaptiveDocumentQualityChecker:
                     "needs_rescan": bool(needs_rescan),
                     "rescan_reasons": rescan_reasons,
                     "rescan_urgency": rescan_urgency,
+                    "rescan_decision": risk_decision,
                     "user_message": self.get_user_friendly_message(issues)
+                },
+                "quality_risk_assessment": {
+                    "quality_risk_score": round(risk_score, 2),
+                    "risk_decision": risk_decision,
+                    "risk_reasons": risk_reasons,
+                    "quality_metrics": quality_metrics
+                },
+                "ml_assessment": {
+                    "ml_available": self.ml_model_data is not None,
+                    "ml_prediction": ml_prediction,
+                    "ml_rescan_probability": round(ml_probability, 3) if ml_probability is not None else None,
+                    "ml_status": ml_status,
+                    "rule_vs_ml_agreement": rule_vs_ml_agreement
                 }
             }
             
@@ -594,6 +819,59 @@ class AdaptiveDocumentQualityChecker:
         all_messages = edge_messages + other_messages
         return " ".join(all_messages) if all_messages else "Document quality assessment completed."
     
+    def learn_from_risk_scoring_feedback(self, document_type: str, actual_quality: str, predicted_decision: str, risk_score: float):
+        """Learn from feedback on risk scoring accuracy"""
+        try:
+            current_weights = adaptive_config.get_adaptive_value(
+                "quality_risk_weights", document_type
+            )
+            
+            if not isinstance(current_weights, dict):
+                # Initialize with defaults if not present
+                current_weights = {
+                    "blur_score": 0.35,
+                    "edge_cut_score": 0.25,
+                    "text_density_score": 0.2,
+                    "brightness_score": 0.1,
+                    "skew_score": 0.1
+                }
+            
+            # Simple learning: adjust weights based on feedback
+            # This is a basic implementation - could be made more sophisticated
+            adjustment_factor = 0.05
+            
+            if actual_quality == "poor" and predicted_decision == "accept":
+                # False negative - we were too lenient, increase sensitivity
+                for key in current_weights:
+                    if key in ["blur_score", "edge_cut_score"]:  # Most important for quality
+                        current_weights[key] = min(0.5, current_weights[key] + adjustment_factor)
+                logger.info(f"Increased quality sensitivity for {document_type} due to false negative")
+                
+            elif actual_quality == "good" and predicted_decision == "reject":
+                # False positive - we were too strict, decrease sensitivity
+                for key in current_weights:
+                    current_weights[key] = max(0.05, current_weights[key] - adjustment_factor)
+                logger.info(f"Decreased quality sensitivity for {document_type} due to false positive")
+            
+            # Normalize weights to sum to 1.0
+            total_weight = sum(current_weights.values())
+            if total_weight > 0:
+                current_weights = {k: v / total_weight for k, v in current_weights.items()}
+            
+            # Store learned weights
+            adaptive_config.learn_from_success(
+                "quality_risk_weights",
+                document_type,
+                current_weights,
+                0.7  # Moderate confidence for weight learning
+            )
+            
+            adaptive_config.save_config()
+            logger.info(f"Updated risk weights for {document_type}: {current_weights}")
+            
+        except Exception as e:
+            logger.warning(f"Risk weight learning error for {document_type}: {e}")
+
     def learn_from_margin_feedback(self, document_type: str, was_false_positive: bool, current_margin: float):
         """Learn from user feedback about margin detection accuracy"""
         try:
@@ -678,3 +956,103 @@ class AdaptiveDocumentQualityChecker:
             
         except Exception as e:
             logger.debug(f"Learning from assessment error: {e}")
+    
+    def demo_risk_scoring(self, document_type: str = "general") -> Dict:
+        """Demo function to show risk scoring with sample metrics"""
+        # Sample metrics for different quality scenarios
+        scenarios = {
+            "excellent": {
+                "blur_confidence": 0.95,
+                "edge_cut_flags": 0,
+                "text_density_violations": 0,
+                "brightness_issue": False,
+                "skew_angle": 2.0
+            },
+            "poor": {
+                "blur_confidence": 0.3,
+                "edge_cut_flags": 3,
+                "text_density_violations": 2,
+                "brightness_issue": True,
+                "skew_angle": 18.0
+            },
+            "marginal": {
+                "blur_confidence": 0.65,
+                "edge_cut_flags": 1,
+                "text_density_violations": 1,
+                "brightness_issue": False,
+                "skew_angle": 6.0
+            }
+        }
+        
+        results = {}
+        for scenario_name, metrics in scenarios.items():
+            risk_score, reasons, decision = self.compute_quality_risk_score(metrics, document_type=document_type)
+            results[scenario_name] = {
+                "risk_score": round(risk_score, 3),
+                "decision": decision,
+                "reasons": reasons,
+                "confidence": round(1.0 - risk_score, 3)
+            }
+        
+        return results
+    
+    def compare_prediction_methods(self, quality_metrics: Dict, document_type: str = "general") -> Dict:
+        """Compare rule-based vs ML predictions side by side"""
+        # Rule-based prediction
+        risk_score, risk_reasons, risk_decision = self.compute_quality_risk_score(
+            quality_metrics, document_type=document_type
+        )
+        
+        # ML prediction  
+        ml_prediction, ml_probability, ml_status = self.predict_rescan_with_ml(quality_metrics)
+        
+        return {
+            "quality_metrics": quality_metrics,
+            "rule_based": {
+                "risk_score": round(risk_score, 3),
+                "decision": risk_decision,
+                "reasons": risk_reasons,
+                "confidence": round(1.0 - risk_score, 3),
+                "needs_rescan": risk_decision == "reject"
+            },
+            "ml_based": {
+                "prediction": ml_prediction,
+                "probability": round(ml_probability, 3) if ml_probability else None,
+                "needs_rescan": bool(ml_prediction) if ml_prediction is not None else None,
+                "confidence": round(max(ml_probability, 1-ml_probability), 3) if ml_probability else None,
+                "status": ml_status
+            },
+            "comparison": {
+                "agreement": (ml_prediction == int(risk_decision == "reject")) if ml_prediction is not None else None,
+                "rule_more_strict": (risk_decision == "reject" and ml_prediction == 0) if ml_prediction is not None else None,
+                "ml_more_strict": (risk_decision != "reject" and ml_prediction == 1) if ml_prediction is not None else None
+            }
+        }
+    
+    def log_quality_assessment_for_training(self, quality_metrics: Dict, actual_needs_rescan: Optional[bool] = None, 
+                                          user_feedback: Optional[str] = None, document_type: str = "general") -> None:
+        """Log quality assessment data for ML training
+        
+        Args:
+            quality_metrics: Extracted quality metrics
+            actual_needs_rescan: Actual ground truth (if known)
+            user_feedback: User feedback about quality
+            document_type: Type of document
+        """
+        try:
+            log_data = {
+                **quality_metrics,
+                "document_type": document_type,
+                "actual_needs_rescan": actual_needs_rescan,
+                "user_feedback": user_feedback,
+                "timestamp": logger.name  # Simple timestamp placeholder
+            }
+            
+            # In a real implementation, you'd append to a CSV or database
+            logger.info(f"Quality assessment logged for training: {log_data}")
+            
+            # TODO: Implement actual logging to CSV/database
+            # This could append to quality_training_data.csv
+            
+        except Exception as e:
+            logger.warning(f"Failed to log quality assessment: {e}")

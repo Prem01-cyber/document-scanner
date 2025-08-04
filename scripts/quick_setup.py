@@ -10,6 +10,11 @@ import sys
 import subprocess
 import logging
 
+# Add project root to Python path for imports
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -56,26 +61,47 @@ def train_initial_model():
     """Train initial ML model with synthetic data"""
     logger.info("Training initial ML model...")
     try:
-        # Run the training script directly
-        import subprocess
-        result = subprocess.run([
-            sys.executable, "-m", "quality.train_quality_classifier"
-        ], capture_output=True, text=True)
+        # Change to project root directory for training
+        original_cwd = os.getcwd()
+        os.chdir(project_root)
         
-        if result.returncode == 0:
-            logger.info("✅ Initial ML model trained successfully")
-            return True
-        else:
-            logger.error(f"❌ Training failed: {result.stderr}")
-            return False
+        # Import and run training directly
+        from quality.train_quality_classifier import main as train_main
+        train_main()
+        
+        # Return to original directory
+        os.chdir(original_cwd)
+        
+        logger.info("✅ Initial ML model trained successfully")
+        return True
     except Exception as e:
         logger.error(f"❌ Failed to train initial model: {e}")
-        return False
+        # Try alternative approach with subprocess
+        try:
+            result = subprocess.run([
+                sys.executable, "-c", 
+                f"import sys; sys.path.insert(0, '{project_root}'); "
+                "from quality.train_quality_classifier import main; main()"
+            ], capture_output=True, text=True, cwd=project_root)
+            
+            if result.returncode == 0:
+                logger.info("✅ Initial ML model trained successfully (subprocess)")
+                return True
+            else:
+                logger.error(f"❌ Training failed: {result.stderr}")
+                return False
+        except Exception as e2:
+            logger.error(f"❌ Failed to train model with subprocess: {e2}")
+            return False
 
 def test_quality_assessment():
     """Test the quality assessment system"""
     logger.info("Testing quality assessment system...")
     try:
+        # Change to project root for imports
+        original_cwd = os.getcwd()
+        os.chdir(project_root)
+        
         from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
         
         checker = AdaptiveDocumentQualityChecker()
@@ -103,9 +129,16 @@ def test_quality_assessment():
             logger.info(f"ML status: {ml_status}")
             logger.info("✅ Rule-based quality assessment is working")
         
+        # Return to original directory
+        os.chdir(original_cwd)
         return True
     except Exception as e:
         logger.error(f"❌ Quality assessment test failed: {e}")
+        # Return to original directory in case of error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
         return False
 
 def main():

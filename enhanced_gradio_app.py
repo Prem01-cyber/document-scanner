@@ -141,6 +141,7 @@ class EnhancedDocumentProcessor:
                     )
             except Exception as e:
                 logger.warning(f"Failed to log quality assessment: {e}")
+                # Don't fail the entire process for logging issues
             
             # Update processing time average
             total_time = self.stats["avg_processing_time"] * (self.stats["total_processed"] - 1) + processing_time
@@ -282,8 +283,13 @@ class EnhancedDocumentProcessor:
 - **ML Decision:** {ml_decision} (prob: {ml_prob:.2f})
 - **Agreement:** {agreement_icon} Rule-ML"""
         elif ml_assessment:
-            quality_info += f"""
-- **ML Status:** Not available ({ml_assessment.get('ml_status', 'unknown')})"""
+            ml_status = ml_assessment.get('ml_status', 'unknown')
+            if 'model_unavailable' in ml_status:
+                quality_info += f"""
+- **ML Status:** Model not trained yet (run training script)"""
+            else:
+                quality_info += f"""
+- **ML Status:** Not available ({ml_status})"""
         
         # User guidance
         rescan_decision = quality_assessment.get("rescan_decision", {})

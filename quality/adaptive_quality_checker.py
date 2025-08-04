@@ -72,15 +72,17 @@ class AdaptiveDocumentQualityChecker:
                 else:
                     features.append(metrics.get(col, 0.0))
             
-            # Convert to numpy array
-            X = np.array(features).reshape(1, -1)
+            # Create DataFrame with proper column names to avoid sklearn warning
+            import pandas as pd
+            X_df = pd.DataFrame([features], columns=feature_columns)
             
             # Apply scaling if needed (for logistic regression)
             if scaler is not None:
-                X = scaler.transform(X)
+                X_scaled = scaler.transform(X_df)
+                X_df = pd.DataFrame(X_scaled, columns=feature_columns)
             
             # Predict
-            probability = model.predict_proba(X)[0][1]  # Probability of class 1 (needs rescan)
+            probability = model.predict_proba(X_df)[0][1]  # Probability of class 1 (needs rescan)
             prediction = int(probability > 0.5)
             
             return prediction, float(probability), "success"
@@ -173,7 +175,7 @@ class AdaptiveDocumentQualityChecker:
         
         # Get adaptive margin percentage based on document type
         margin_pct = adaptive_config.get_adaptive_value(
-            "quality_thresholds", "cut_edge_margin_pct", document_type
+            "quality_thresholds", "cut_edge_margin_pct"
         )
         
         # Fallback margins for different document types
@@ -489,13 +491,15 @@ class AdaptiveDocumentQualityChecker:
                 
             # 4. Adaptive Skew Detection
             median_angle = 0.0  # Default
+            skew_tolerance = 15.0  # Default value
             try:
                 hough_threshold = max(50, int(min(gray.shape) * 0.1))
                 lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=hough_threshold)
                 
                 if lines is not None and len(lines) > 0:
                     angles = []
-                    for rho, theta in lines[:15]:
+                    for line in lines[:15]:
+                        rho, theta = line[0]
                         angle = theta * 180 / np.pi
                         if angle > 90:
                             angle = 180 - angle
@@ -506,9 +510,12 @@ class AdaptiveDocumentQualityChecker:
                         self._last_skew_angle = median_angle  # Store for risk scoring
                         
                         # Use adaptive skew tolerance (learned parameter)
-                        skew_tolerance = adaptive_config.get_adaptive_value(
-                            "quality_thresholds", "skew_tolerance"
-                        )
+                        try:
+                            skew_tolerance = adaptive_config.get_adaptive_value(
+                                "quality_thresholds", "skew_tolerance"
+                            )
+                        except:
+                            skew_tolerance = 15.0  # Fallback
                         
                         if abs(median_angle) > skew_tolerance and abs(median_angle - 90) > skew_tolerance:
                             issues.append("skewed_document")

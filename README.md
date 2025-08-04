@@ -2,18 +2,24 @@
 
 **Advanced document processing with hybrid quality assessment and intelligent key-value extraction**
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Centralized Runner)
 
-For complete setup and running instructions, see: **[HOW_TO_RUN.md](HOW_TO_RUN.md)**
+**NEW**: Single command for everything! See: **[HOW_TO_RUN.md](HOW_TO_RUN.md)**
 
 ```bash
-# Quick setup
-python scripts/quick_setup.py
-
-# Launch enhanced UI
-python enhanced_gradio_app.py
-
+# Complete setup and launch (3 commands total!)
+python run.py setup           # Setup everything
+python run.py ui              # Launch enhanced UI
 # Open browser: http://localhost:7861
+```
+
+**All Operations:**
+```bash
+python run.py --help          # See all commands
+python run.py status          # Check system status
+python run.py test            # Run diagnostics
+python run.py train           # Train ML model
+python run.py stop            # Stop all services
 ```
 
 ## 📁 Project Structure

@@ -1,5 +1,32 @@
 # 🚀 How to Run the Document Scanner Application
 
+## 🎯 Centralized Application Runner
+
+**NEW**: We now have a centralized `run.py` script that handles all operations!
+
+```bash
+python run.py --help  # See all available commands
+```
+
+**Key Commands:**
+- `python run.py setup` - Complete setup and installation
+- `python run.py ui` - Launch enhanced Gradio UI  
+- `python run.py api` - Launch FastAPI service
+- `python run.py status` - Check system status
+- `python run.py test` - Run diagnostics
+- `python run.py train` - Train ML model
+- `python run.py demo <name>` - Run demo scripts
+- `python run.py stop` - Stop all services
+
+**Benefits:**
+- ✅ **Single entry point** for all operations
+- ✅ **Automatic path management** - no more import issues
+- ✅ **Service management** - start/stop/status tracking
+- ✅ **Consistent interface** across all functions
+- ✅ **Error handling** and user-friendly messages
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -87,32 +114,39 @@ document-scanner/
 
 ---
 
-## 🚀 Quick Start (Recommended)
+## 🚀 Quick Start (Centralized Runner - Recommended)
 
-### **1. Automated Setup**
+### **⚡ Super Quick Start**
 ```bash
-# Clone the repository
+# 1. Clone and setup
 git clone <repository-url>
 cd document-scanner
+python run.py setup
 
-# Run automated setup
-python scripts/quick_setup.py
+# 2. Launch UI
+python run.py ui
+
+# 3. Open browser: http://localhost:7861
 ```
 
-The setup script will:
-- ✅ Check and install dependencies
+That's it! The centralized runner handles everything automatically.
+
+### **📋 What the setup does:**
+- ✅ Check system prerequisites and Python version
+- ✅ Install all dependencies automatically
+- ✅ Create environment configuration file
 - ✅ Train initial ML model with synthetic data
-- ✅ Test the quality assessment system
+- ✅ Test all system components
 - ✅ Verify system readiness
 
-### **2. Launch Enhanced UI**
+### **🎯 Available Commands:**
 ```bash
-# Start the enhanced Gradio interface
-python enhanced_gradio_app.py
+python run.py status          # Check what's running
+python run.py test            # Run diagnostics  
+python run.py train           # Train ML model
+python run.py demo risk       # Run demo scripts
+python run.py stop            # Stop all services
 ```
-
-### **3. Open Browser**
-Navigate to: **http://localhost:7861**
 
 ---
 
@@ -160,11 +194,12 @@ python -m quality.train_quality_classifier
 
 ---
 
-## 🎮 Running the Applications
+## 🎮 Running the Applications (Centralized Commands)
 
 ### **🌟 Enhanced Gradio UI (Recommended)**
 ```bash
-python enhanced_gradio_app.py
+python run.py ui
+# Alternative: python enhanced_gradio_app.py
 ```
 - **URL**: http://localhost:7861
 - **Features**: 
@@ -176,7 +211,8 @@ python enhanced_gradio_app.py
 
 ### **🔗 FastAPI Web Service**
 ```bash
-python main.py
+python run.py api
+# Alternative: python main.py
 ```
 - **URL**: http://localhost:8000
 - **API Docs**: http://localhost:8000/docs
@@ -185,19 +221,10 @@ python main.py
   - Batch processing support
   - Integration-ready JSON responses
 
-### **📱 Original Gradio UI**
-```bash
-python gradio_app.py
-```
-- **URL**: http://localhost:7860
-- **Features**: 
-  - Clean, simple interface
-  - Core document processing
-  - Basic quality assessment
-
 ### **🔌 Hybrid API Service**
 ```bash
-python hybrid_api_app.py
+python run.py hybrid-api
+# Alternative: python hybrid_api_app.py
 ```
 - **URL**: http://localhost:8001
 - **Features**: 
@@ -205,32 +232,57 @@ python hybrid_api_app.py
   - Multiple extraction strategies
   - LLM provider selection
 
+### **📱 Original Gradio UI**
+```bash
+python gradio_app.py  # (No centralized command yet)
+```
+- **URL**: http://localhost:7860
+- **Features**: 
+  - Clean, simple interface
+  - Core document processing
+  - Basic quality assessment
+
 ---
 
-## 🧪 Testing & Demos
+## 🧪 Testing & Demos (Centralized Commands)
 
-### **🎯 Quality Assessment Demo**
+### **🎯 Quality Assessment Demos**
 ```bash
 # Test risk scoring system
-python -m demos.demo_risk_scoring
+python run.py demo risk
 
 # Test complete hybrid system
-python -m demos.demo_hybrid_quality_system
+python run.py demo hybrid
 
 # Test adaptive learning
-python -m demos.demo_adaptive_learning
+python run.py demo adaptive
+
+# Alternative methods:
+# python -m demos.demo_risk_scoring
+# python -m demos.demo_hybrid_quality_system
+# python -m demos.demo_adaptive_learning
 ```
 
 ### **🔬 System Tests**
 ```bash
-# Run integration tests
-python -m tests.test_hybrid_system
+# Test system components (centralized)
+python run.py test
 
-# Test API clients
-python -m tests.test_client
+# Check system status
+python run.py status
 
-# Test Gradio interfaces
-python -m tests.test_gradio_interface
+# Alternative methods:
+# python -m tests.test_hybrid_system
+# python -m tests.test_client
+```
+
+### **🤖 ML Model Training**
+```bash
+# Train ML model (centralized)
+python run.py train
+
+# Alternative method:
+# python -m quality.train_quality_classifier
 ```
 
 ---
@@ -361,15 +413,38 @@ docker run -p 8000:8000 \
 
 ---
 
+## 🔧 Recent Fixes & Improvements
+
+**✅ Quality Assessment System Updates (Latest)**:
+- Fixed AdaptiveConfig parameter mismatch issues
+- Resolved skew detection unpacking errors  
+- Fixed variable scope issues in quality checker
+- Eliminated sklearn feature name warnings
+- Improved error handling and user messaging
+- Enhanced ML model integration with proper DataFrame usage
+
+Run `python test_quality_fixes.py` to verify all fixes are working correctly.
+
+---
+
 ## 🚨 Troubleshooting
 
 ### **❌ Common Issues**
 
-**1. Import Errors**
+**1. Import Errors / "No module named 'quality'" / "No module named 'src'"**
 ```bash
-# If you get import errors, run from project root:
+# Solution 1: Use root-level setup script
+python setup.py
+
+# Solution 2: Set Python path explicitly
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-python enhanced_gradio_app.py
+python scripts/quick_setup.py
+
+# Solution 3: Run as module
+python -m scripts.quick_setup
+
+# Solution 4: For enhanced Gradio app
+PYTHONPATH=. python enhanced_gradio_app.py
 ```
 
 **2. Google Cloud Vision Setup**
@@ -405,7 +480,14 @@ sudo lsof -ti:8000 | xargs kill -9  # FastAPI
 
 **Check System Status**:
 ```bash
-python scripts/quick_setup.py  # Automated diagnostics
+python run.py status          # Centralized status check
+python run.py test            # Run all diagnostics
+# python scripts/quick_setup.py  # Alternative
+```
+
+**Stop All Services**:
+```bash
+python run.py stop            # Stop everything cleanly
 ```
 
 **Verify Dependencies**:

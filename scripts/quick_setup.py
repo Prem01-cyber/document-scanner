@@ -56,15 +56,18 @@ def train_initial_model():
     """Train initial ML model with synthetic data"""
     logger.info("Training initial ML model...")
     try:
-        from train_quality_classifier import QualityClassifierTrainer
+        # Run the training script directly
+        import subprocess
+        result = subprocess.run([
+            sys.executable, "-m", "quality.train_quality_classifier"
+        ], capture_output=True, text=True)
         
-        trainer = QualityClassifierTrainer()
-        df = trainer.generate_synthetic_training_data(500)
-        results = trainer.train_models(df)
-        best_model = trainer.save_best_model(results)
-        
-        logger.info(f"✅ Initial ML model trained successfully: {best_model}")
-        return True
+        if result.returncode == 0:
+            logger.info("✅ Initial ML model trained successfully")
+            return True
+        else:
+            logger.error(f"❌ Training failed: {result.stderr}")
+            return False
     except Exception as e:
         logger.error(f"❌ Failed to train initial model: {e}")
         return False
@@ -73,7 +76,7 @@ def test_quality_assessment():
     """Test the quality assessment system"""
     logger.info("Testing quality assessment system...")
     try:
-        from adaptive_quality_checker import AdaptiveDocumentQualityChecker
+        from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
         
         checker = AdaptiveDocumentQualityChecker()
         

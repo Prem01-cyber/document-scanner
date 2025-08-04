@@ -9,11 +9,11 @@ import asyncio
 import time
 from fastapi import HTTPException
 
-from adaptive_quality_checker import AdaptiveDocumentQualityChecker
-from hybrid_kv_extractor import HybridKeyValueExtractor, ExtractionStrategy, HybridExtractionResult
-from llm_kv_extractor import LLMProvider, LLMKeyValueExtractor, LLMKeyValuePair
-from adaptive_kv_extractor import KeyValuePair
-from config import adaptive_config
+from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
+from .hybrid_kv_extractor import HybridKeyValueExtractor, ExtractionStrategy, HybridExtractionResult
+from .llm_kv_extractor import LLMProvider, LLMKeyValueExtractor, LLMKeyValuePair
+from .adaptive_kv_extractor import KeyValuePair
+from .config import adaptive_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class GoogleOCRProcessor:
         """Extract text with bounding boxes - returns both structured blocks and raw text"""
         try:
             from google.cloud import vision
-            from adaptive_kv_extractor import TextBlock, BoundingBox
+            from .adaptive_kv_extractor import TextBlock, BoundingBox
             
             image = vision.Image(content=image_bytes)
             response = self.client.document_text_detection(image=image)

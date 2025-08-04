@@ -1,3 +1,33 @@
+# 🧠 Enhanced Document Scanner
+
+**Advanced document processing with hybrid quality assessment and intelligent key-value extraction**
+
+## 🚀 Quick Start
+
+For complete setup and running instructions, see: **[HOW_TO_RUN.md](HOW_TO_RUN.md)**
+
+```bash
+# Quick setup
+python scripts/quick_setup.py
+
+# Launch enhanced UI
+python enhanced_gradio_app.py
+
+# Open browser: http://localhost:7861
+```
+
+## 📁 Project Structure
+
+The project is now organized into logical directories:
+- **`src/`** - Core processing modules
+- **`quality/`** - Hybrid quality assessment system  
+- **`demos/`** - Demo scripts and examples
+- **`tests/`** - Test suites
+- **`docs/`** - Documentation
+- **`scripts/`** - Setup and utility scripts
+- **`config/`** - Configuration files
+- **`deploy/`** - Deployment scripts and Docker files
+
 ## 🔁 End-to-End Pipeline Overview
 
 ### ➤ **You give an image (`.jpg`, `.png`) as input**

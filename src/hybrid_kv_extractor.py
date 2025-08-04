@@ -8,8 +8,8 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from adaptive_kv_extractor import AdaptiveKeyValueExtractor, TextBlock, KeyValuePair
-from llm_kv_extractor import LLMKeyValueExtractor, LLMKeyValuePair, LLMProvider
+from .adaptive_kv_extractor import AdaptiveKeyValueExtractor, TextBlock, KeyValuePair
+from .llm_kv_extractor import LLMKeyValueExtractor, LLMKeyValuePair, LLMProvider
 
 logger = logging.getLogger(__name__)
 

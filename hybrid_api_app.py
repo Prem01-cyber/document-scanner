@@ -13,10 +13,10 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-from hybrid_document_processor import HybridDocumentProcessor
-from hybrid_kv_extractor import ExtractionStrategy
-from llm_kv_extractor import LLMProvider
-from config import adaptive_config
+from src.hybrid_document_processor import HybridDocumentProcessor
+from src.hybrid_kv_extractor import ExtractionStrategy
+from src.llm_kv_extractor import LLMProvider
+from src.config import adaptive_config
 
 logger = logging.getLogger(__name__)
 

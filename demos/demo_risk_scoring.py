@@ -4,7 +4,8 @@ Demo script to test the new risk-based quality scoring system
 """
 
 import json
-from adaptive_quality_checker import AdaptiveDocumentQualityChecker
+from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
+from src.config import adaptive_config
 
 def demo_risk_scoring_system():
     """Demonstrate the risk scoring functionality"""

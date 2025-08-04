@@ -6,7 +6,7 @@ import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 import logging
 import os
-from config import adaptive_config
+from src.config import adaptive_config
 
 # ML model imports (with fallback)
 try:

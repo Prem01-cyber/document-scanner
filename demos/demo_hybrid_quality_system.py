@@ -10,9 +10,9 @@ import numpy as np
 import json
 from typing import Dict, List
 import logging
-from adaptive_quality_checker import AdaptiveDocumentQualityChecker
-from quality_data_collector import QualityDataCollector
-from train_quality_classifier import QualityClassifierTrainer
+from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
+from quality.quality_data_collector import quality_data_collector
+from quality.train_quality_classifier import train_quality_classifier
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)

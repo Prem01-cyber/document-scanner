@@ -13,7 +13,7 @@ import time
 import random
 import numpy as np
 from typing import Dict, List
-from config import adaptive_config
+from src.config import adaptive_config
 
 def simulate_document_processing_session(session_id: int, document_type: str) -> Dict:
     """

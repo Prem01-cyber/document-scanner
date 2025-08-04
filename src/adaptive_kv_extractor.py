@@ -7,7 +7,7 @@ from scipy.spatial.distance import cosine
 from typing import List, Dict, Tuple, Optional
 import logging
 from dataclasses import dataclass
-from config import adaptive_config
+from .config import adaptive_config
 
 logger = logging.getLogger(__name__)
 

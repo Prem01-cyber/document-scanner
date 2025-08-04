@@ -8,9 +8,9 @@ import logging
 import asyncio
 from fastapi import HTTPException
 
-from adaptive_quality_checker import AdaptiveDocumentQualityChecker
-from adaptive_kv_extractor import AdaptiveKeyValueExtractor, TextBlock, BoundingBox
-from config import adaptive_config
+from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
+from .adaptive_kv_extractor import AdaptiveKeyValueExtractor, TextBlock, BoundingBox
+from .config import adaptive_config
 
 logger = logging.getLogger(__name__)
 

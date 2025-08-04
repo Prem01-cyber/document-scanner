@@ -3248,6 +3248,25 @@ class DocumentProcessor:
                 "error": str(e),
                 "quality_assessment": quality_result
             }
+        
+        # Step 2.5: Enhanced quality assessment with text blocks for cut-off detection
+        try:
+            enhanced_quality_result = self.quality_checker.assess_quality(image, text_blocks=text_blocks)
+            
+            # If enhanced assessment finds new issues, use it instead
+            if enhanced_quality_result["needs_rescan"] and not quality_result["needs_rescan"]:
+                return {
+                    "status": "rescan_needed",
+                    "quality_assessment": enhanced_quality_result,
+                    "message": self.quality_checker.get_user_friendly_message(enhanced_quality_result["issues"]),
+                    "enhanced_check": True
+                }
+            elif enhanced_quality_result["confidence"] < quality_result["confidence"] - 0.1:
+                # Use enhanced result if significantly lower confidence
+                quality_result = enhanced_quality_result
+        except Exception as enhanced_qc_error:
+            logger.warning(f"Enhanced quality check failed: {enhanced_qc_error}")
+            # Continue with original quality result
             
         # Step 3: Enhanced Key-Value Extraction with splitting stats
         original_block_count = len(text_blocks)

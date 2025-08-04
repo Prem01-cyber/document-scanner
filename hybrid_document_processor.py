@@ -170,6 +170,28 @@ class HybridDocumentProcessor:
             
             processing_audit.append(f"✅ OCR completed: {len(text_blocks)} blocks, {len(raw_text)} chars in {ocr_time:.3f}s")
             
+            # Step 2.5: Enhanced quality assessment with text blocks for cut-off detection
+            try:
+                enhanced_quality_result = self.quality_checker.assess_quality(image, text_blocks=text_blocks)
+                
+                # If enhanced assessment finds new cut-off issues, handle accordingly
+                if enhanced_quality_result["needs_rescan"] and not quality_result["needs_rescan"]:
+                    processing_audit.append("⚠️ Enhanced quality check detected cut-off issues")
+                    return {
+                        "status": "rescan_needed",
+                        "quality_assessment": enhanced_quality_result,
+                        "message": self.quality_checker.get_user_friendly_message(enhanced_quality_result["issues"]),
+                        "processing_audit": processing_audit,
+                        "enhanced_check_triggered": True
+                    }
+                elif enhanced_quality_result["confidence"] < quality_result["confidence"] - 0.1:
+                    # Use enhanced result if significantly lower confidence
+                    quality_result = enhanced_quality_result
+                    processing_audit.append(f"📋 Updated quality assessment (confidence: {quality_result['confidence']:.3f})")
+            except Exception as enhanced_qc_error:
+                processing_audit.append(f"⚠️ Enhanced quality check failed: {enhanced_qc_error}")
+                logger.warning(f"Enhanced quality check failed: {enhanced_qc_error}")
+            
         except Exception as e:
             processing_audit.append(f"❌ OCR failed: {e}")
             return {

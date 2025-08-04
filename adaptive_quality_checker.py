@@ -3,7 +3,7 @@
 
 import cv2
 import numpy as np
-from typing import Dict
+from typing import Dict, List, Optional, Any
 import logging
 from config import adaptive_config
 
@@ -15,6 +15,61 @@ class AdaptiveDocumentQualityChecker:
     def __init__(self):
         # No more hardcoded values - everything comes from adaptive config
         pass
+    
+    def detect_cut_edges(self, image: np.ndarray, contour, margin_pct: float = 0.03) -> List[str]:
+        """Detect if document edges are cut off by checking margin clearance"""
+        height, width = image.shape[:2]
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        margin_x = int(width * margin_pct)
+        margin_y = int(height * margin_pct)
+        
+        issues = []
+        if x <= margin_x:
+            issues.append("left_edge_cut")
+        if y <= margin_y:
+            issues.append("top_edge_cut")
+        if x + w >= width - margin_x:
+            issues.append("right_edge_cut")
+        if y + h >= height - margin_y:
+            issues.append("bottom_edge_cut")
+        
+        return issues
+    
+    def detect_text_near_edges(self, text_blocks, image_shape, threshold: int = 20) -> List[str]:
+        """Detect if text is too close to image edges, indicating cropped content"""
+        if not text_blocks:
+            return []
+            
+        h, w = image_shape[:2]
+        issues = []
+        
+        for block in text_blocks:
+            # Handle different text block formats
+            if hasattr(block, 'bbox'):
+                bbox = block.bbox
+                x = getattr(bbox, 'x', 0)
+                y = getattr(bbox, 'y', 0)
+                width = getattr(bbox, 'width', 0)
+                height = getattr(bbox, 'height', 0)
+            elif hasattr(block, 'x'):
+                # Direct coordinate access
+                x, y = block.x, block.y
+                width, height = getattr(block, 'width', 0), getattr(block, 'height', 0)
+            else:
+                continue
+                
+            # Check proximity to edges
+            if x < threshold:
+                issues.append("text_near_left_edge")
+            if y < threshold:
+                issues.append("text_near_top_edge")
+            if x + width > w - threshold:
+                issues.append("text_near_right_edge")
+            if y + height > h - threshold:
+                issues.append("text_near_bottom_edge")
+        
+        return list(set(issues))
     
     def _get_adaptive_thresholds(self, image: np.ndarray) -> Dict:
         """Calculate adaptive thresholds using learned parameters"""
@@ -89,7 +144,7 @@ class AdaptiveDocumentQualityChecker:
             'adaptive_bounds_used': True
         }
     
-    def assess_quality(self, image: np.ndarray) -> Dict:
+    def assess_quality(self, image: np.ndarray, text_blocks: Optional[List[Any]] = None, largest_contour: Optional[np.ndarray] = None) -> Dict:
         """
         Adaptive document quality assessment with learned thresholds
         """
@@ -151,8 +206,9 @@ class AdaptiveDocumentQualityChecker:
                     contours, _ = contours_result
                 
                 if contours:
-                    # Find largest contour
-                    largest_contour = max(contours, key=cv2.contourArea)
+                    # Find largest contour (or use provided one)
+                    if largest_contour is None:
+                        largest_contour = max(contours, key=cv2.contourArea)
                     contour_area = cv2.contourArea(largest_contour)
                     
                     # Use adaptive min contour area ratio (learned from previous documents)
@@ -174,6 +230,15 @@ class AdaptiveDocumentQualityChecker:
                     if len(approx) < 4:
                         issues.append("irregular_shape")
                         confidence -= 0.1
+                    
+                    # NEW: Check for cut edges using margin clearance
+                    cut_edge_issues = self.detect_cut_edges(image, largest_contour)
+                    if cut_edge_issues:
+                        issues.extend(cut_edge_issues)
+                        # Apply penalties based on severity
+                        edge_penalty = len(cut_edge_issues) * 0.2
+                        confidence -= min(0.4, edge_penalty)
+                        logger.info(f"Cut edge issues detected: {cut_edge_issues}")
                         
             except Exception as contour_error:
                 logger.warning(f"Contour detection failed: {contour_error}")
@@ -221,15 +286,44 @@ class AdaptiveDocumentQualityChecker:
                     
             except Exception:
                 pass
+            
+            # NEW: Check for text near edges (if text blocks provided)
+            text_edge_issues = []
+            if text_blocks:
+                try:
+                    text_edge_issues = self.detect_text_near_edges(text_blocks, image.shape)
+                    if text_edge_issues:
+                        issues.extend(text_edge_issues)
+                        # Higher penalty for text cut off issues
+                        text_edge_penalty = len(text_edge_issues) * 0.15
+                        confidence -= min(0.3, text_edge_penalty)
+                        logger.info(f"Text edge issues detected: {text_edge_issues}")
+                except Exception as text_edge_error:
+                    logger.warning(f"Text edge detection failed: {text_edge_error}")
                 
-            # Adaptive decision logic
+            # Enhanced adaptive decision logic with edge-based penalties
+            edge_cut_issues = [issue for issue in issues if "_edge_cut" in issue]
+            text_edge_issues = [issue for issue in issues if "text_near_" in issue]
+            
+            # Force rescan for severe edge issues
+            force_rescan_conditions = [
+                len(edge_cut_issues) >= 2,  # Multiple edges cut
+                len(text_edge_issues) >= 3,  # Text near multiple edges
+                (edge_cut_issues and text_edge_issues)  # Both contour and text edge issues
+            ]
+            
             issue_weight = len(issues) * 0.1
             confidence_penalty = min(0.3, issue_weight)
             final_confidence = max(0.0, confidence - confidence_penalty)
             
-            # More lenient threshold for bright images
-            brightness_adjusted_threshold = 0.5 if "too_bright" in issues else 0.6
-            needs_rescan = final_confidence < brightness_adjusted_threshold
+            # Adjust threshold based on issue types
+            if any(force_rescan_conditions):
+                needs_rescan = True
+                final_confidence = min(final_confidence, 0.4)  # Cap confidence for edge issues
+            else:
+                # More lenient threshold for bright images
+                brightness_adjusted_threshold = 0.5 if "too_bright" in issues else 0.6
+                needs_rescan = final_confidence < brightness_adjusted_threshold
             
             result = {
                 "needs_rescan": bool(needs_rescan),
@@ -255,6 +349,12 @@ class AdaptiveDocumentQualityChecker:
                 "learning_metadata": {
                     "adaptive_bounds_used": thresholds.get('adaptive_bounds_used', False),
                     "parameters_learned_from_history": True
+                },
+                "cut_off_analysis": {
+                    "edge_cut_issues": [issue for issue in issues if "_edge_cut" in issue],
+                    "text_edge_issues": [issue for issue in issues if "text_near_" in issue],
+                    "margin_check_performed": largest_contour is not None,
+                    "text_edge_check_performed": text_blocks is not None and len(text_blocks) > 0
                 }
             }
             
@@ -287,6 +387,62 @@ class AdaptiveDocumentQualityChecker:
                 "error": str(e),
                 "fallback_used": True
             }
+    
+    def get_user_friendly_message(self, issues: List[str]) -> str:
+        """Generate user-friendly messages for detected issues"""
+        edge_messages = []
+        
+        # Edge cut messages
+        edge_cuts = [issue for issue in issues if "_edge_cut" in issue]
+        if edge_cuts:
+            directions = []
+            if "left_edge_cut" in edge_cuts:
+                directions.append("left")
+            if "right_edge_cut" in edge_cuts:
+                directions.append("right")
+            if "top_edge_cut" in edge_cuts:
+                directions.append("top")
+            if "bottom_edge_cut" in edge_cuts:
+                directions.append("bottom")
+            
+            if directions:
+                edge_messages.append(f"Document appears cut off at the {'/'.join(directions)} edge(s). Please re-scan with proper margins.")
+        
+        # Text edge messages
+        text_edges = [issue for issue in issues if "text_near_" in issue]
+        if text_edges:
+            text_directions = []
+            if "text_near_left_edge" in text_edges:
+                text_directions.append("left")
+            if "text_near_right_edge" in text_edges:
+                text_directions.append("right")
+            if "text_near_top_edge" in text_edges:
+                text_directions.append("top")
+            if "text_near_bottom_edge" in text_edges:
+                text_directions.append("bottom")
+            
+            if text_directions:
+                edge_messages.append(f"Text is too close to the {'/'.join(text_directions)} edge(s), indicating possible content cropping.")
+        
+        # Combine with existing issue messages
+        other_messages = []
+        if "blurry_image" in issues:
+            other_messages.append("Image appears blurry - please ensure the camera is steady and focused.")
+        if "too_dark" in issues:
+            other_messages.append("Image is too dark - please improve lighting conditions.")
+        if "too_bright" in issues:
+            other_messages.append("Image is too bright - please reduce lighting or adjust camera exposure.")
+        if "skewed_document" in issues:
+            other_messages.append("Document appears skewed - please align the document properly.")
+        if "document_too_small" in issues:
+            other_messages.append("Document appears too small in the frame - please move closer or zoom in.")
+        if "irregular_shape" in issues:
+            other_messages.append("Document shape appears irregular - please ensure the full document is visible.")
+        if "low_content_density" in issues:
+            other_messages.append("Low text content detected - please ensure the document is clearly visible.")
+        
+        all_messages = edge_messages + other_messages
+        return " ".join(all_messages) if all_messages else "Document quality assessment completed."
     
     def _learn_from_successful_assessment(self, thresholds: Dict, confidence: float):
         """

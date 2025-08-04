@@ -97,3 +97,9 @@ wasabi==1.1.3
 watchfiles==1.1.0
 weasel==0.3.4
 websockets==15.0.1
+
+# ML dependencies for quality assessment
+scikit-learn==1.3.2
+joblib==1.3.2
+matplotlib==3.8.2
+seaborn==0.13.0

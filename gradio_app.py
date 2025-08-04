@@ -177,14 +177,18 @@ class DocumentProcessor:
     
     def _create_success_response(self, result, processing_time, original_image):
         """Create a success response with annotated image and data"""
-        pairs = result.get("key_value_pairs", [])
+        all_pairs = result.get("key_value_pairs", [])
         
-        # Create annotated image
-        annotated_image = self._create_simple_annotation(original_image, pairs)
+        # Filter pairs based on confidence threshold
+        confidence_threshold = self.processor.kv_extractor.adaptive_confidence_threshold
+        filtered_pairs = [pair for pair in all_pairs if pair.get("confidence", 0) >= confidence_threshold]
         
-        # Create table data
+        # Create annotated image with filtered pairs
+        annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
+        
+        # Create table data for filtered pairs
         table_data = []
-        for i, pair in enumerate(pairs, 1):
+        for i, pair in enumerate(filtered_pairs, 1):
             confidence = pair.get("confidence", 0)
             confidence_str = f"{confidence:.2f}"
             if confidence > 0.8:
@@ -210,22 +214,31 @@ class DocumentProcessor:
         except:
             pass
         
-        # Create summary
+        # Get filtering statistics
+        total_pairs = len(all_pairs)
+        shown_pairs = len(filtered_pairs)
+        filtered_out = total_pairs - shown_pairs
+        
+        # Create summary with filtering info
         summary = f"""### ✅ Processing Successful
         
 **⏱️ Processing Time:** {processing_time:.2f} seconds  
-**📊 Extracted Pairs:** {len(pairs)}  
+**📊 Total Pairs Found:** {total_pairs}  
+**✅ Pairs Shown (≥{confidence_threshold:.1f} confidence):** {shown_pairs}  
+**🚫 Filtered Out:** {filtered_out} pairs  
 **🎯 Strategy Used:** {result.get('extraction_metadata', {}).get('strategy_used', 'unknown')}  
 **🔧 Primary Method:** {result.get('extraction_metadata', {}).get('primary_method', 'unknown')}  
 **🤖 LLM Provider:** {llm_used}
 
-**📈 Confidence Distribution:**
-- High (>0.8): {sum(1 for p in pairs if p.get('confidence', 0) > 0.8)} pairs  
-- Medium (0.5-0.8): {sum(1 for p in pairs if 0.5 < p.get('confidence', 0) <= 0.8)} pairs  
-- Low (<0.5): {sum(1 for p in pairs if p.get('confidence', 0) <= 0.5)} pairs
+**📈 Confidence Distribution (Shown pairs only):**
+- High (>0.8): {sum(1 for p in filtered_pairs if p.get('confidence', 0) > 0.8)} pairs  
+- Medium (0.5-0.8): {sum(1 for p in filtered_pairs if 0.5 < p.get('confidence', 0) <= 0.8)} pairs  
+- Low ({confidence_threshold:.1f}-0.5): {sum(1 for p in filtered_pairs if confidence_threshold <= p.get('confidence', 0) <= 0.5)} pairs
 
-**📋 Method Breakdown:**
-{self._get_method_breakdown(pairs)}
+**📋 Method Breakdown (Shown pairs only):**
+{self._get_method_breakdown(filtered_pairs)}
+
+💡 **Tip:** Lower the confidence threshold to see more results, or raise it to see only the most confident pairs.
 """
         
         return {
@@ -233,7 +246,7 @@ class DocumentProcessor:
             "image": annotated_image,
             "table": table_data,
             "summary": summary,
-            "status": f"✅ Successfully extracted {len(pairs)} key-value pairs"
+            "status": f"✅ Found {total_pairs} pairs, showing {shown_pairs} above {confidence_threshold:.1f} confidence"
         }
     
     def _create_error_response(self, message):
@@ -246,46 +259,69 @@ class DocumentProcessor:
             "status": f"❌ {message}"
         }
     
-    def _create_simple_annotation(self, image, pairs):
-        """Create a clean, simple annotation of the image"""
+    def _create_enhanced_annotation(self, image, pairs, confidence_threshold):
+        """Create a clean, elegant annotation of the image with confidence-based filtering"""
         if not pairs:
-            return image
+            # Create a simple overlay indicating no pairs to show
+            img_array = np.array(image)
+            h, w = img_array.shape[:2]
+            
+            # Add minimal notification
+            overlay = img_array.copy()
+            cv2.rectangle(overlay, (10, 10), (w-10, 60), (40, 40, 40), -1)
+            cv2.addWeighted(img_array, 0.85, overlay, 0.15, 0, img_array)
+            
+            text = f"No pairs above {confidence_threshold:.1f} confidence threshold"
+            cv2.putText(img_array, text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            return Image.fromarray(img_array)
         
         # Convert to OpenCV format
         img_array = np.array(image)
         
-        # Colors for annotation
-        colors = {
-            "key": (0, 255, 255),     # Cyan for keys
-            "value": (255, 255, 0),   # Yellow for values
-            "connection": (255, 255, 255)  # White for connections
-        }
+        # Clean color scheme based on confidence
+        def get_confidence_color(confidence):
+            if confidence > 0.8:
+                return (0, 255, 0)      # Green for high confidence
+            elif confidence > 0.6:
+                return (0, 200, 255)    # Orange for medium-high confidence  
+            elif confidence > 0.4:
+                return (0, 150, 255)    # Light red for medium confidence
+            else:
+                return (0, 100, 255)    # Red for low confidence
         
-        # Draw bounding boxes and connections
+        # Draw clean bounding boxes
         for i, pair in enumerate(pairs):
             confidence = pair.get("confidence", 0)
-            thickness = max(1, int(confidence * 3))
+            color = get_confidence_color(confidence)
+            
+            # Adjust thickness based on confidence (but keep it reasonable)
+            thickness = 2 if confidence > 0.7 else 1
             
             key_bbox = pair.get("key_bbox")
             value_bbox = pair.get("value_bbox")
             
-            # Draw key box
+            # Draw key box - clean and simple
             if key_bbox:
                 x, y, w, h = key_bbox["x"], key_bbox["y"], key_bbox["width"], key_bbox["height"]
-                cv2.rectangle(img_array, (x, y), (x + w, y + h), colors["key"], thickness)
-                cv2.putText(img_array, f"K{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors["key"], 1)
+                cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
+                
+                # Simple label without confidence score clutter
+                cv2.putText(img_array, f"K{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             
-            # Draw value box
+            # Draw value box - clean and simple  
             if value_bbox:
                 x, y, w, h = value_bbox["x"], value_bbox["y"], value_bbox["width"], value_bbox["height"]
-                cv2.rectangle(img_array, (x, y), (x + w, y + h), colors["value"], thickness)
-                cv2.putText(img_array, f"V{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors["value"], 1)
+                cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
                 
-                # Draw connection line
+                # Simple label
+                cv2.putText(img_array, f"V{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                
+                # Draw clean connection line
                 if key_bbox:
                     key_center = (key_bbox["x"] + key_bbox["width"]//2, key_bbox["y"] + key_bbox["height"]//2)
                     value_center = (x + w//2, y + h//2)
-                    cv2.line(img_array, key_center, value_center, colors["connection"], 1)
+                    cv2.line(img_array, key_center, value_center, color, 1)
         
         return Image.fromarray(img_array)
     
@@ -527,7 +563,8 @@ def create_modern_interface():
                         )
                         
                         gr.Markdown("""
-                        **Legend:** 🟦 Keys | 🟨 Values | ⚪ Connections
+                        **Legend:** 🟢 High Confidence (>0.8) | 🟡 Medium (>0.6) | 🟠 Low (>0.4) | 🔴 Very Low  
+                        **K#** = Key, **V#** = Value, Lines show connections, Numbers show confidence scores
                         """)
                     
                     with gr.TabItem("📋 Extracted Data"):
@@ -571,7 +608,7 @@ def create_modern_interface():
         
         - **📸 Image Quality:** Use clear, well-lit images
         - **🔄 Strategy:** Try 'Adaptive First' for forms, 'LLM First' for complex documents  
-        - **⚙️ Confidence:** Lower threshold (0.3) for more results, higher (0.7) for quality
+        - **⚙️ Confidence:** Lower threshold (0.3) for more results, higher (0.7) for quality filtering
         - **🤖 LLM Provider:** Interface shows only available providers
         - **🔧 Troubleshooting:** Check system status if processing fails
         

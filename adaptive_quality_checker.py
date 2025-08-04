@@ -16,10 +16,26 @@ class AdaptiveDocumentQualityChecker:
         # No more hardcoded values - everything comes from adaptive config
         pass
     
-    def detect_cut_edges(self, image: np.ndarray, contour, margin_pct: float = 0.03) -> List[str]:
-        """Detect if document edges are cut off by checking margin clearance"""
+    def detect_cut_edges(self, image: np.ndarray, contour, document_type: str = "general") -> List[str]:
+        """Detect if document edges are cut off using adaptive margin thresholds"""
         height, width = image.shape[:2]
         x, y, w, h = cv2.boundingRect(contour)
+        
+        # Get adaptive margin percentage based on document type
+        margin_pct = adaptive_config.get_adaptive_value(
+            "quality_thresholds", "cut_edge_margin_pct", document_type
+        )
+        
+        # Fallback margins for different document types
+        if not isinstance(margin_pct, (int, float)):
+            margin_defaults = {
+                "form": 0.015,
+                "letter": 0.05,
+                "receipt": 0.02,
+                "certificate": 0.04,
+                "general": 0.03
+            }
+            margin_pct = margin_defaults.get(document_type, 0.03)
         
         margin_x = int(width * margin_pct)
         margin_y = int(height * margin_pct)
@@ -35,6 +51,55 @@ class AdaptiveDocumentQualityChecker:
             issues.append("bottom_edge_cut")
         
         return issues
+    
+    def detect_text_density_near_edges(self, text_blocks, image_shape, edge_threshold: int = 30, density_ratio: float = 0.12) -> Dict[str, Any]:
+        """Detect high text density near edges indicating possible cut-off"""
+        if not text_blocks:
+            return {"issues": [], "density_ratios": {}, "total_blocks": 0}
+            
+        h, w = image_shape[:2]
+        total_blocks = len(text_blocks)
+        edge_counts = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+        
+        for block in text_blocks:
+            # Handle different text block formats
+            if hasattr(block, 'bbox'):
+                bbox = block.bbox
+                x = getattr(bbox, 'x', 0)
+                y = getattr(bbox, 'y', 0)
+                width = getattr(bbox, 'width', 0)
+                height = getattr(bbox, 'height', 0)
+            elif hasattr(block, 'x'):
+                x, y = block.x, block.y
+                width, height = getattr(block, 'width', 0), getattr(block, 'height', 0)
+            else:
+                continue
+                
+            # Count blocks near each edge
+            if x < edge_threshold:
+                edge_counts["left"] += 1
+            if y < edge_threshold:
+                edge_counts["top"] += 1
+            if x + width > w - edge_threshold:
+                edge_counts["right"] += 1
+            if y + height > h - edge_threshold:
+                edge_counts["bottom"] += 1
+        
+        # Calculate density ratios
+        density_ratios = {edge: count / total_blocks for edge, count in edge_counts.items()}
+        
+        # Identify violations
+        issues = []
+        for edge, ratio in density_ratios.items():
+            if ratio > density_ratio:
+                issues.append(f"edge_density_violation_{edge}")
+        
+        return {
+            "issues": issues,
+            "density_ratios": density_ratios,
+            "total_blocks": total_blocks,
+            "edge_counts": edge_counts
+        }
     
     def detect_text_near_edges(self, text_blocks, image_shape, threshold: int = 20) -> List[str]:
         """Detect if text is too close to image edges, indicating cropped content"""
@@ -144,7 +209,7 @@ class AdaptiveDocumentQualityChecker:
             'adaptive_bounds_used': True
         }
     
-    def assess_quality(self, image: np.ndarray, text_blocks: Optional[List[Any]] = None, largest_contour: Optional[np.ndarray] = None) -> Dict:
+    def assess_quality(self, image: np.ndarray, text_blocks: Optional[List[Any]] = None, largest_contour: Optional[np.ndarray] = None, document_type: str = "general") -> Dict:
         """
         Adaptive document quality assessment with learned thresholds
         """
@@ -231,8 +296,8 @@ class AdaptiveDocumentQualityChecker:
                         issues.append("irregular_shape")
                         confidence -= 0.1
                     
-                    # NEW: Check for cut edges using margin clearance
-                    cut_edge_issues = self.detect_cut_edges(image, largest_contour)
+                    # NEW: Check for cut edges using adaptive margin clearance
+                    cut_edge_issues = self.detect_cut_edges(image, largest_contour, document_type)
                     if cut_edge_issues:
                         issues.extend(cut_edge_issues)
                         # Apply penalties based on severity
@@ -287,10 +352,12 @@ class AdaptiveDocumentQualityChecker:
             except Exception:
                 pass
             
-            # NEW: Check for text near edges (if text blocks provided)
+            # NEW: Comprehensive text edge analysis
             text_edge_issues = []
+            text_density_analysis = {}
             if text_blocks:
                 try:
+                    # Check for text near edges
                     text_edge_issues = self.detect_text_near_edges(text_blocks, image.shape)
                     if text_edge_issues:
                         issues.extend(text_edge_issues)
@@ -298,30 +365,86 @@ class AdaptiveDocumentQualityChecker:
                         text_edge_penalty = len(text_edge_issues) * 0.15
                         confidence -= min(0.3, text_edge_penalty)
                         logger.info(f"Text edge issues detected: {text_edge_issues}")
+                    
+                    # Check for text density violations near edges
+                    text_density_analysis = self.detect_text_density_near_edges(text_blocks, image.shape)
+                    density_issues = text_density_analysis.get("issues", [])
+                    if density_issues:
+                        issues.extend(density_issues)
+                        # Penalty for density violations
+                        density_penalty = len(density_issues) * 0.1
+                        confidence -= min(0.2, density_penalty)
+                        logger.info(f"Text density violations detected: {density_issues}")
+                        
                 except Exception as text_edge_error:
                     logger.warning(f"Text edge detection failed: {text_edge_error}")
                 
-            # Enhanced adaptive decision logic with edge-based penalties
+            # Enhanced adaptive decision logic with comprehensive edge analysis
             edge_cut_issues = [issue for issue in issues if "_edge_cut" in issue]
             text_edge_issues = [issue for issue in issues if "text_near_" in issue]
+            density_violations = [issue for issue in issues if "edge_density_violation" in issue]
             
-            # Force rescan for severe edge issues
-            force_rescan_conditions = [
+            # Categorize rescan reasons and urgency
+            rescan_reasons = []
+            rescan_urgency = "low"
+            
+            # Critical edge issues (high urgency)
+            critical_conditions = [
                 len(edge_cut_issues) >= 2,  # Multiple edges cut
                 len(text_edge_issues) >= 3,  # Text near multiple edges
-                (edge_cut_issues and text_edge_issues)  # Both contour and text edge issues
+                (edge_cut_issues and text_edge_issues),  # Both contour and text edge issues
+                len(density_violations) >= 2  # Multiple density violations
             ]
+            
+            if any(critical_conditions):
+                rescan_urgency = "high"
+                if len(edge_cut_issues) >= 2:
+                    rescan_reasons.append("multiple_edges_cut")
+                if len(text_edge_issues) >= 3:
+                    rescan_reasons.append("text_near_multiple_edges")
+                if edge_cut_issues and text_edge_issues:
+                    rescan_reasons.append("combined_edge_issues")
+                if len(density_violations) >= 2:
+                    rescan_reasons.append("high_text_density_near_edges")
+            
+            # Medium urgency conditions
+            medium_conditions = [
+                len(edge_cut_issues) == 1,
+                len(text_edge_issues) in [1, 2],
+                len(density_violations) == 1,
+                ("low_content_density" in issues and (edge_cut_issues or text_edge_issues))
+            ]
+            
+            if any(medium_conditions) and rescan_urgency == "low":
+                rescan_urgency = "medium"
+                if len(edge_cut_issues) == 1:
+                    rescan_reasons.append("single_edge_cut")
+                if len(text_edge_issues) in [1, 2]:
+                    rescan_reasons.append("text_near_edge")
+                if len(density_violations) == 1:
+                    rescan_reasons.append("text_density_violation")
+            
+            # Standard quality issues
+            if "blurry_image" in issues:
+                rescan_reasons.append("blurry_image")
+            if "too_dark" in issues or "too_bright" in issues:
+                rescan_reasons.append("poor_lighting")
+            if "skewed_document" in issues:
+                rescan_reasons.append("document_skewed")
             
             issue_weight = len(issues) * 0.1
             confidence_penalty = min(0.3, issue_weight)
             final_confidence = max(0.0, confidence - confidence_penalty)
             
-            # Adjust threshold based on issue types
-            if any(force_rescan_conditions):
+            # Determine rescan necessity based on urgency and confidence
+            if rescan_urgency == "high":
                 needs_rescan = True
-                final_confidence = min(final_confidence, 0.4)  # Cap confidence for edge issues
+                final_confidence = min(final_confidence, 0.4)  # Cap confidence for critical edge issues
+            elif rescan_urgency == "medium":
+                threshold = 0.55
+                needs_rescan = final_confidence < threshold
             else:
-                # More lenient threshold for bright images
+                # Standard threshold logic
                 brightness_adjusted_threshold = 0.5 if "too_bright" in issues else 0.6
                 needs_rescan = final_confidence < brightness_adjusted_threshold
             
@@ -351,10 +474,20 @@ class AdaptiveDocumentQualityChecker:
                     "parameters_learned_from_history": True
                 },
                 "cut_off_analysis": {
-                    "edge_cut_issues": [issue for issue in issues if "_edge_cut" in issue],
-                    "text_edge_issues": [issue for issue in issues if "text_near_" in issue],
+                    "edge_cut_issues": edge_cut_issues,
+                    "text_edge_issues": text_edge_issues,
+                    "density_violations": density_violations,
+                    "text_density_ratios": text_density_analysis.get("density_ratios", {}),
+                    "edge_counts": text_density_analysis.get("edge_counts", {}),
                     "margin_check_performed": largest_contour is not None,
-                    "text_edge_check_performed": text_blocks is not None and len(text_blocks) > 0
+                    "text_edge_check_performed": text_blocks is not None and len(text_blocks) > 0,
+                    "document_type": document_type
+                },
+                "rescan_decision": {
+                    "needs_rescan": bool(needs_rescan),
+                    "rescan_reasons": rescan_reasons,
+                    "rescan_urgency": rescan_urgency,
+                    "user_message": self.get_user_friendly_message(issues)
                 }
             }
             
@@ -422,7 +555,24 @@ class AdaptiveDocumentQualityChecker:
                 text_directions.append("bottom")
             
             if text_directions:
-                edge_messages.append(f"Text is too close to the {'/'.join(text_directions)} edge(s), indicating possible content cropping.")
+                edge_messages.append(f"Text too close to {'/'.join(text_directions)} edge(s). Possibly cut off.")
+        
+        # Density violation messages
+        density_violations = [issue for issue in issues if "edge_density_violation" in issue]
+        if density_violations:
+            affected_edges = []
+            for issue in density_violations:
+                if "_left" in issue:
+                    affected_edges.append("left")
+                elif "_right" in issue:
+                    affected_edges.append("right")
+                elif "_top" in issue:
+                    affected_edges.append("top")
+                elif "_bottom" in issue:
+                    affected_edges.append("bottom")
+            
+            if affected_edges:
+                edge_messages.append(f"Too much text near {'/'.join(affected_edges)} border(s) — possible scan error.")
         
         # Combine with existing issue messages
         other_messages = []
@@ -444,6 +594,63 @@ class AdaptiveDocumentQualityChecker:
         all_messages = edge_messages + other_messages
         return " ".join(all_messages) if all_messages else "Document quality assessment completed."
     
+    def learn_from_margin_feedback(self, document_type: str, was_false_positive: bool, current_margin: float):
+        """Learn from user feedback about margin detection accuracy"""
+        try:
+            current_value = adaptive_config.get_adaptive_value(
+                "quality_thresholds", "cut_edge_margin_pct", document_type
+            )
+            
+            if not isinstance(current_value, (int, float)):
+                current_value = current_margin
+            
+            if was_false_positive:
+                # Reduce sensitivity (increase margin) if it was a false positive
+                new_margin = min(0.08, current_value * 1.2)  # Cap at 8%
+                logger.info(f"Reducing margin sensitivity for {document_type}: {current_value:.3f} -> {new_margin:.3f}")
+            else:
+                # Increase sensitivity (decrease margin) if it was a true positive that we should catch better
+                new_margin = max(0.005, current_value * 0.9)  # Floor at 0.5%  
+                logger.info(f"Increasing margin sensitivity for {document_type}: {current_value:.3f} -> {new_margin:.3f}")
+            
+            # Update the learned margin
+            adaptive_config.learn_from_success(
+                "quality_thresholds",
+                "cut_edge_margin_pct",
+                {document_type: new_margin},
+                0.8  # Moderate confidence for margin learning
+            )
+            
+            adaptive_config.save_config()
+            
+        except Exception as e:
+            logger.warning(f"Margin learning error for {document_type}: {e}")
+    
+    def update_text_edge_threshold_from_usage(self, document_type: str, successful_scans: int, edge_violations: int):
+        """Update text edge detection threshold based on usage patterns"""
+        try:
+            if successful_scans > 10:  # Only learn after sufficient data
+                violation_rate = edge_violations / successful_scans
+                
+                # Current threshold (default 20 pixels)
+                current_threshold = 20
+                
+                if violation_rate < 0.05:  # Very few violations - can be more sensitive
+                    new_threshold = max(15, current_threshold * 0.9)
+                elif violation_rate > 0.15:  # Too many violations - be less sensitive  
+                    new_threshold = min(35, current_threshold * 1.1)
+                else:
+                    new_threshold = current_threshold  # Keep current
+                
+                if new_threshold != current_threshold:
+                    logger.info(f"Adjusting text edge threshold for {document_type}: {current_threshold} -> {new_threshold}")
+                    
+                    # Store learning data (this would need to be expanded in adaptive_config if needed)
+                    # For now, we'll just log the learning
+                    
+        except Exception as e:
+            logger.warning(f"Text edge threshold learning error: {e}")
+
     def _learn_from_successful_assessment(self, thresholds: Dict, confidence: float):
         """
         Learn from successful quality assessments to improve future thresholds

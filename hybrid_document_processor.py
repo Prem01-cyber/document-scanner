@@ -144,14 +144,17 @@ class HybridDocumentProcessor:
         
         # Step 1: Adaptive Quality Assessment
         processing_audit.append("📋 Step 1: Quality assessment")
-        quality_result = self.quality_checker.assess_quality(image)
+        quality_result = self.quality_checker.assess_quality(image, document_type=document_type)
         
         if quality_result["needs_rescan"]:
             processing_audit.append("❌ Quality insufficient - requesting rescan")
+            rescan_decision = quality_result.get("rescan_decision", {})
             return {
                 "status": "rescan_needed",
                 "quality_assessment": quality_result,
-                "message": "Document quality is insufficient. Please rescan.",
+                "message": rescan_decision.get("user_message", "Document quality is insufficient. Please rescan."),
+                "rescan_reasons": rescan_decision.get("rescan_reasons", []),
+                "rescan_urgency": rescan_decision.get("rescan_urgency", "medium"),
                 "processing_audit": processing_audit,
                 "hybrid_info": {
                     "quality_check_only": True,
@@ -172,15 +175,18 @@ class HybridDocumentProcessor:
             
             # Step 2.5: Enhanced quality assessment with text blocks for cut-off detection
             try:
-                enhanced_quality_result = self.quality_checker.assess_quality(image, text_blocks=text_blocks)
+                enhanced_quality_result = self.quality_checker.assess_quality(image, text_blocks=text_blocks, document_type=document_type)
                 
                 # If enhanced assessment finds new cut-off issues, handle accordingly
                 if enhanced_quality_result["needs_rescan"] and not quality_result["needs_rescan"]:
                     processing_audit.append("⚠️ Enhanced quality check detected cut-off issues")
+                    rescan_decision = enhanced_quality_result.get("rescan_decision", {})
                     return {
                         "status": "rescan_needed",
                         "quality_assessment": enhanced_quality_result,
-                        "message": self.quality_checker.get_user_friendly_message(enhanced_quality_result["issues"]),
+                        "message": rescan_decision.get("user_message", "Cut-off issues detected. Please rescan."),
+                        "rescan_reasons": rescan_decision.get("rescan_reasons", []),
+                        "rescan_urgency": rescan_decision.get("rescan_urgency", "high"),
                         "processing_audit": processing_audit,
                         "enhanced_check_triggered": True
                     }
@@ -265,6 +271,8 @@ class HybridDocumentProcessor:
             "processing_statistics": extraction_stats,
             "processing_time_seconds": total_processing_time,
             "processing_audit": processing_audit,
+            "cut_off_analysis": quality_result.get("cut_off_analysis", {}),
+            "rescan_decision": quality_result.get("rescan_decision", {}),
             "hybrid_system_info": {
                 "adaptive_learning_enabled": self.kv_extractor.enable_learning,
                 "llm_providers_available": list(self.kv_extractor.llm_extractor.available_providers.keys()),

@@ -3230,13 +3230,16 @@ class DocumentProcessor:
         start_time = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0
         
         # Step 1: Quality Assessment
-        quality_result = self.quality_checker.assess_quality(image)
+        quality_result = self.quality_checker.assess_quality(image, document_type="general")
         
         if quality_result["needs_rescan"]:
+            rescan_decision = quality_result.get("rescan_decision", {})
             return {
                 "status": "rescan_needed",
                 "quality_assessment": quality_result,
-                "message": "Document quality is insufficient. Please rescan."
+                "message": rescan_decision.get("user_message", "Document quality is insufficient. Please rescan."),
+                "rescan_reasons": rescan_decision.get("rescan_reasons", []),
+                "rescan_urgency": rescan_decision.get("rescan_urgency", "medium")
             }
             
         # Step 2: OCR Processing
@@ -3251,14 +3254,17 @@ class DocumentProcessor:
         
         # Step 2.5: Enhanced quality assessment with text blocks for cut-off detection
         try:
-            enhanced_quality_result = self.quality_checker.assess_quality(image, text_blocks=text_blocks)
+            enhanced_quality_result = self.quality_checker.assess_quality(image, text_blocks=text_blocks, document_type="general")
             
-            # If enhanced assessment finds new issues, use it instead
+            # If enhanced assessment finds new issues, use it with detailed rescan info
             if enhanced_quality_result["needs_rescan"] and not quality_result["needs_rescan"]:
+                rescan_decision = enhanced_quality_result.get("rescan_decision", {})
                 return {
                     "status": "rescan_needed",
                     "quality_assessment": enhanced_quality_result,
-                    "message": self.quality_checker.get_user_friendly_message(enhanced_quality_result["issues"]),
+                    "message": rescan_decision.get("user_message", "Document quality is insufficient. Please rescan."),
+                    "rescan_reasons": rescan_decision.get("rescan_reasons", []),
+                    "rescan_urgency": rescan_decision.get("rescan_urgency", "medium"),
                     "enhanced_check": True
                 }
             elif enhanced_quality_result["confidence"] < quality_result["confidence"] - 0.1:

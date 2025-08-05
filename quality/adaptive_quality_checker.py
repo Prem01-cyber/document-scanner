@@ -105,7 +105,7 @@ class AdaptiveDocumentQualityChecker:
         # Get adaptive weights if available, otherwise use defaults
         if weights is None:
             weights = adaptive_config.get_adaptive_value(
-                "quality_risk_weights", document_type
+                "quality_risk_weights", "default_weights"
             )
             
             # Fallback to sensible defaults if not learned yet
@@ -499,11 +499,19 @@ class AdaptiveDocumentQualityChecker:
                 if lines is not None and len(lines) > 0:
                     angles = []
                     for line in lines[:15]:
-                        rho, theta = line[0]
-                        angle = theta * 180 / np.pi
-                        if angle > 90:
-                            angle = 180 - angle
-                        angles.append(angle)
+                        try:
+                            # Handle different HoughLines output formats
+                            if hasattr(line, '__len__') and len(line) >= 1:
+                                line_data = line[0] if isinstance(line[0], (list, tuple, np.ndarray)) else line
+                                if hasattr(line_data, '__len__') and len(line_data) >= 2:
+                                    rho, theta = line_data[0], line_data[1]
+                                    angle = theta * 180 / np.pi
+                                    if angle > 90:
+                                        angle = 180 - angle
+                                    angles.append(angle)
+                        except (ValueError, IndexError, TypeError) as e:
+                            logger.debug(f"Skipping malformed line data: {e}")
+                            continue
                     
                     if angles:
                         median_angle = np.median(angles)

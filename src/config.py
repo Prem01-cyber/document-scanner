@@ -5,6 +5,9 @@ import json
 import os
 from typing import Dict, Any
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AdaptiveConfig:
     """
@@ -137,7 +140,24 @@ class AdaptiveConfig:
             
             # Calculate weighted average of learned values
             recent_values = learned_values[-10:]  # Use recent values
-            weighted_avg = np.average(recent_values, weights=np.linspace(0.5, 1.0, len(recent_values)))
+            
+            # Ensure recent_values is a flat numeric array
+            try:
+                # Convert to numpy array and flatten if needed
+                values_array = np.array(recent_values, dtype=float).flatten()
+                weights_array = np.linspace(0.5, 1.0, len(values_array))
+                
+                # Ensure shapes match
+                if len(values_array) == len(weights_array) and len(values_array) > 0:
+                    weighted_avg = np.average(values_array, weights=weights_array)
+                else:
+                    # Fallback to simple average if shapes don't match
+                    weighted_avg = np.mean(values_array) if len(values_array) > 0 else default_value
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Error in weighted average calculation: {e}. Using simple mean.")
+                weighted_avg = np.mean([float(v) for v in recent_values if isinstance(v, (int, float))])
+                if np.isnan(weighted_avg):
+                    weighted_avg = default_value
             
             # Blend with default based on confidence
             adaptive_value = (

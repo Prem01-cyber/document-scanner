@@ -79,8 +79,10 @@ rsa==4.9.1
 ruff==0.12.7
 safehttpx==0.1.6
 scikit-learn==1.7.1
+scikit-image==0.21.0
 scipy==1.11.4
 seaborn==0.13.2
+statsmodels==0.14.0
 semantic-version==2.10.0
 setuptools==80.9.0
 shellingham==1.5.4

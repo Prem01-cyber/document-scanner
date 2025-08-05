@@ -16,6 +16,14 @@ except ImportError:
     ML_AVAILABLE = False
     joblib = None
 
+# Advanced quality features (with fallback)
+try:
+    from quality.advanced_quality_features import get_advanced_quality_features, advanced_analyzer
+    ADVANCED_FEATURES_AVAILABLE = True
+except ImportError:
+    ADVANCED_FEATURES_AVAILABLE = False
+    advanced_analyzer = None
+
 logger = logging.getLogger(__name__)
 
 class AdaptiveDocumentQualityChecker:
@@ -653,9 +661,47 @@ class AdaptiveDocumentQualityChecker:
             # Get ML prediction if available
             ml_prediction, ml_probability, ml_status = self.predict_rescan_with_ml(quality_metrics)
             
+            # Advanced quality features analysis (if available)
+            advanced_features = {}
+            advanced_available = False
+            if ADVANCED_FEATURES_AVAILABLE and advanced_analyzer:
+                try:
+                    advanced_features = get_advanced_quality_features(
+                        gray, text_blocks, largest_contour, document_type
+                    )
+                    advanced_available = True
+                    logger.debug(f"Advanced quality analysis completed: {len(advanced_features)} features")
+                    
+                    # Use advanced features to refine confidence and decision if available
+                    if 'overall_quality_score' in advanced_features:
+                        advanced_confidence = advanced_features['overall_quality_score']
+                        # Initial rule-based confidence from risk score
+                        rule_based_confidence = 1.0 - risk_score
+                        # Blend advanced confidence with rule-based confidence (weighted average)
+                        blended_confidence = 0.7 * rule_based_confidence + 0.3 * advanced_confidence
+                        final_confidence = round(blended_confidence, 2)
+                        logger.info(f"Quality confidence enhanced with advanced features: {advanced_confidence:.2f}")
+                    
+                    # Update risk score if statistical modeling is available
+                    if 'statistical_risk_probability' in advanced_features:
+                        statistical_risk = advanced_features['statistical_risk_probability']
+                        # Use statistical risk to refine the decision
+                        if statistical_risk > 0.6 and risk_score < 0.6:
+                            risk_score = max(risk_score, statistical_risk * 0.9)  # Weighted blend
+                            risk_decision = "reject" if risk_score >= 0.65 else ("warn" if risk_score >= 0.4 else "accept")
+                            logger.info(f"Risk decision updated with statistical analysis: {risk_decision}")
+                            
+                except Exception as e:
+                    logger.warning(f"Advanced quality features failed: {e}")
+                    advanced_features = {}
+                    advanced_available = False
+            
             # Determine final decision (prioritize rule-based for now, but log both)
             needs_rescan = risk_decision == "reject"
-            final_confidence = round(1.0 - risk_score, 2)
+            
+            # Set final confidence if not already set by advanced features
+            if 'final_confidence' not in locals():
+                final_confidence = round(1.0 - risk_score, 2)
             
             # Update rescan reasons with risk-based analysis
             if risk_reasons:
@@ -728,6 +774,39 @@ class AdaptiveDocumentQualityChecker:
                     "ml_rescan_probability": round(ml_probability, 3) if ml_probability is not None else None,
                     "ml_status": ml_status,
                     "rule_vs_ml_agreement": rule_vs_ml_agreement
+                },
+                "advanced_quality_assessment": {
+                    "advanced_features_available": advanced_available,
+                    "overall_quality_score": advanced_features.get('overall_quality_score'),
+                    "quality_class": advanced_features.get('quality_class'),
+                    "enhanced_blur_analysis": {
+                        "tenengrad_energy": advanced_features.get('tenengrad_energy'),
+                        "composite_blur_confidence": advanced_features.get('composite_blur_confidence'),
+                        "brenner_focus": advanced_features.get('brenner_focus')
+                    } if advanced_available else {},
+                    "brightness_analysis": {
+                        "brightness_skewness": advanced_features.get('brightness_skewness'),
+                        "brightness_entropy": advanced_features.get('brightness_entropy'),
+                        "overexposure_ratio": advanced_features.get('overexposure_ratio'),
+                        "underexposure_ratio": advanced_features.get('underexposure_ratio'),
+                        "rms_contrast": advanced_features.get('rms_contrast')
+                    } if advanced_available else {},
+                    "text_layout_analysis": {
+                        "text_spacing_variance": advanced_features.get('text_spacing_variance'),
+                        "text_alignment_score": advanced_features.get('text_alignment_score'),
+                        "text_density_uniformity": advanced_features.get('text_density_uniformity')
+                    } if advanced_available else {},
+                    "morphological_analysis": {
+                        "edge_density": advanced_features.get('edge_density'),
+                        "connected_components": advanced_features.get('connected_components'),
+                        "border_edge_density": advanced_features.get('border_edge_density')
+                    } if advanced_available else {},
+                    "statistical_modeling": {
+                        "statistical_risk_probability": advanced_features.get('statistical_risk_probability'),
+                        "statistical_confidence": advanced_features.get('statistical_confidence'),
+                        "dominant_risk_factor": advanced_features.get('dominant_risk_factor'),
+                        "feature_contributions": advanced_features.get('feature_contributions', {})
+                    } if advanced_available else {}
                 }
             }
             

@@ -495,6 +495,102 @@ def create_enhanced_interface():
 - **Density Violations:** {', '.join(density_violations) if density_violations else 'None'}
 """
         
+        # Advanced quality assessment
+        advanced_assessment = quality_assessment.get("advanced_quality_assessment", {})
+        if advanced_assessment and advanced_assessment.get("advanced_features_available", False):
+            overall_score = advanced_assessment.get("overall_quality_score", 0)
+            quality_class = advanced_assessment.get("quality_class", "unknown")
+            
+            # Quality class icon
+            class_icons = {"excellent": "🌟", "good": "✅", "fair": "⚠️", "poor": "❌", "unknown": "❓"}
+            class_icon = class_icons.get(quality_class, "❓")
+            
+            display += f"""
+### 🔬 Advanced Quality Analysis
+- **Overall Quality Score:** {overall_score:.3f}
+- **Quality Class:** {class_icon} {quality_class.title()}
+"""
+            
+            # Enhanced blur analysis
+            blur_analysis = advanced_assessment.get("enhanced_blur_analysis", {})
+            if blur_analysis:
+                tenengrad = blur_analysis.get("tenengrad_energy", 0)
+                composite_blur = blur_analysis.get("composite_blur_confidence", 0)
+                brenner = blur_analysis.get("brenner_focus", 0)
+                
+                display += f"""
+#### 🌫️ Enhanced Blur Detection
+- **Tenengrad Energy:** {tenengrad:.1f} (higher = sharper)
+- **Composite Blur Confidence:** {composite_blur:.3f}
+- **Brenner Focus:** {brenner:.1f}
+"""
+            
+            # Brightness analysis
+            brightness_analysis = advanced_assessment.get("brightness_analysis", {})
+            if brightness_analysis:
+                skewness = brightness_analysis.get("brightness_skewness", 0)
+                entropy = brightness_analysis.get("brightness_entropy", 0)
+                overexposure = brightness_analysis.get("overexposure_ratio", 0)
+                underexposure = brightness_analysis.get("underexposure_ratio", 0)
+                contrast = brightness_analysis.get("rms_contrast", 0)
+                
+                display += f"""
+#### 💡 Statistical Brightness Analysis
+- **Brightness Skewness:** {skewness:.3f} (0=symmetric, ±1=skewed)
+- **Brightness Entropy:** {entropy:.3f} (higher = more varied)
+- **Overexposure Ratio:** {overexposure:.3f} ({overexposure*100:.1f}%)
+- **Underexposure Ratio:** {underexposure:.3f} ({underexposure*100:.1f}%)
+- **RMS Contrast:** {contrast:.1f}
+"""
+            
+            # Text layout analysis
+            layout_analysis = advanced_assessment.get("text_layout_analysis", {})
+            if layout_analysis:
+                spacing_var = layout_analysis.get("text_spacing_variance", 0)
+                alignment_score = layout_analysis.get("text_alignment_score", 0)
+                density_uniformity = layout_analysis.get("text_density_uniformity", 0)
+                
+                display += f"""
+#### 📝 Text Layout Analysis
+- **Text Spacing Variance:** {spacing_var:.2f} (lower = more uniform)
+- **Text Alignment Score:** {alignment_score:.3f} (0=perfect, 1=scattered)
+- **Text Density Uniformity:** {density_uniformity:.3f} (higher = more even)
+"""
+            
+            # Morphological analysis
+            morph_analysis = advanced_assessment.get("morphological_analysis", {})
+            if morph_analysis:
+                edge_density = morph_analysis.get("edge_density", 0)
+                components = morph_analysis.get("connected_components", 0)
+                border_density = morph_analysis.get("border_edge_density", 0)
+                
+                display += f"""
+#### 🔍 Morphological Edge Analysis
+- **Edge Density:** {edge_density:.4f} ({edge_density*100:.2f}%)
+- **Connected Components:** {components}
+- **Border Edge Density:** {border_density:.4f} (higher = possible cut-off)
+"""
+            
+            # Statistical modeling
+            stats_modeling = advanced_assessment.get("statistical_modeling", {})
+            if stats_modeling:
+                risk_prob = stats_modeling.get("statistical_risk_probability", 0)
+                confidence = stats_modeling.get("statistical_confidence", 0)
+                dominant_factor = stats_modeling.get("dominant_risk_factor", "unknown")
+                
+                display += f"""
+#### 📊 Statistical Risk Modeling
+- **Statistical Risk Probability:** {risk_prob:.3f}
+- **Statistical Confidence:** {confidence:.3f}
+- **Dominant Risk Factor:** {dominant_factor.replace('_', ' ').title()}
+"""
+        else:
+            display += f"""
+### 🔬 Advanced Quality Analysis
+- **Status:** Not Available
+- **Note:** Install scikit-image, scipy, and statsmodels for advanced features
+"""
+        
         # Rescan recommendations
         rescan_decision = quality_assessment.get("rescan_decision", {})
         if rescan_decision:

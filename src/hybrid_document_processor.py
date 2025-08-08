@@ -10,6 +10,7 @@ import time
 from fastapi import HTTPException
 from prometheus_client import Histogram
 from .logging_utils import configure_json_logging
+import base64
 
 from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
 from .hybrid_kv_extractor import HybridKeyValueExtractor, ExtractionStrategy, HybridExtractionResult
@@ -31,7 +32,7 @@ class GoogleOCRProcessor:
             raise HTTPException(status_code=500, detail="Google Cloud Vision API not configured")
     
     def extract_text_with_bounds(self, image_bytes: bytes):
-        """Extract text with bounding boxes - returns both structured blocks and raw text
+        """Extract text with bounding boxes - returns structured blocks, raw text, and preprocessed image bytes
         Applies basic preprocessing (deskew, denoise, adaptive threshold) before OCR.
         """
         try:
@@ -45,8 +46,11 @@ class GoogleOCRProcessor:
                 raise Exception("Invalid image data for OCR")
 
             processed = self._preprocess_for_ocr(img_cv)
-            _, processed_buf = cv2.imencode('.png', processed)
-            image = vision.Image(content=processed_buf.tobytes())
+            success, processed_buf = cv2.imencode('.png', processed)
+            if not success:
+                raise Exception("Failed to encode preprocessed image")
+            processed_png_bytes = processed_buf.tobytes()
+            image = vision.Image(content=processed_png_bytes)
             response = self.client.document_text_detection(image=image)
             
             if response.error.message:
@@ -92,7 +96,7 @@ class GoogleOCRProcessor:
             if not raw_text:
                 raw_text = "\n".join(raw_text_parts)
             
-            return text_blocks, raw_text
+            return text_blocks, raw_text, processed_png_bytes
             
         except Exception as e:
             logger.error(f"OCR processing error: {e}")
@@ -232,7 +236,7 @@ class HybridDocumentProcessor:
         processing_audit.append("📄 Step 2: OCR text extraction")
         try:
             ocr_start = time.time()
-            text_blocks, raw_text = self.ocr_processor.extract_text_with_bounds(image_bytes)
+            text_blocks, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(image_bytes)
             ocr_time = time.time() - ocr_start
             
             processing_audit.append(f"✅ OCR completed: {len(text_blocks)} blocks, {len(raw_text)} chars in {ocr_time:.3f}s (preprocessed)")
@@ -327,6 +331,7 @@ class HybridDocumentProcessor:
                 "raw_text_length": len(raw_text),
                 "processing_time_seconds": ocr_time
             },
+            "preprocessed_image_b64": base64.b64encode(preproc_png).decode("ascii") if preproc_png else None,
             "key_value_pairs": self._format_extraction_results(hybrid_result.pairs),
             "extraction_metadata": {
                 "primary_method": hybrid_result.primary_method,

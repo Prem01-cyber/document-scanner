@@ -16,6 +16,7 @@ import logging
 from datetime import datetime
 import traceback
 from dotenv import load_dotenv
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -179,8 +180,14 @@ class EnhancedDocumentProcessor:
         
         # Create annotated image
         annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
-        # OCR overlay using all Google OCR blocks from response
-        ocr_overlay_image = self._create_ocr_overlay(original_image, result.get("extracted_text_blocks", []), filtered_pairs)
+        # Preprocessed preview from backend
+        pre_b64 = result.get("preprocessed_image_b64")
+        pre_image = None
+        if pre_b64:
+            try:
+                pre_image = Image.open(io.BytesIO(base64.b64decode(pre_b64)))
+            except Exception:
+                pre_image = None
         
         # Create quality overlay image if available
         quality_overlay_image = None
@@ -239,7 +246,7 @@ class EnhancedDocumentProcessor:
             "success": True,
             "image": annotated_image,
             "quality_overlay": quality_overlay_image or annotated_image,
-            "ocr_overlay": ocr_overlay_image,
+            "preprocessed": pre_image,
             "table": table_data,
             "summary": summary,
             "quality_assessment": result.get("quality_assessment", {}),
@@ -463,7 +470,7 @@ def create_enhanced_interface():
             return (
                 result["image"],
                 result.get("quality_overlay", result["image"]),  # Quality overlay image
-                result.get("ocr_overlay", result["image"]),      # OCR overlay image
+                result.get("preprocessed", result["image"]),     # Preprocessed image for OCR
                 result["table"], 
                 result["summary"],
                 quality_display,
@@ -473,7 +480,7 @@ def create_enhanced_interface():
             return (
                 None,
                 None,  # No quality overlay for errors
-                None,  # No OCR overlay for errors
+                None,  # No preprocessed image for errors
                 [],
                 result["summary"],
                 "Quality assessment not available due to processing error.",
@@ -905,9 +912,9 @@ def create_enhanced_interface():
                             label="Quality Assessment Overlay",
                             interactive=False
                         )
-                    with gr.TabItem("🔤 OCR Blocks"):
-                        ocr_overlay_image = gr.Image(
-                            label="OCR Blocks Overlay",
+                    with gr.TabItem("🧪 Preprocessed (OCR Input)"):
+                        preprocessed_image = gr.Image(
+                            label="Preprocessed Image for OCR",
                             interactive=False
                         )
                         
@@ -920,11 +927,7 @@ def create_enhanced_interface():
                         **Gray Dashed Lines** = Safe margin guidelines
                         """)
                     
-                    with gr.TabItem("🔤 OCR Blocks"):
-                        ocr_overlay_image = gr.Image(
-                            label="OCR Blocks Overlay",
-                            interactive=False
-                        )
+                    # (Removed OCR Blocks tab per request)
 
                     with gr.TabItem("📋 Extracted Data"):
                         result_table = gr.Dataframe(
@@ -965,11 +968,7 @@ def create_enhanced_interface():
                         feedback_btn = gr.Button("📝 Submit Feedback", size="sm")
                         feedback_result = gr.Markdown()
                     
-                    with gr.TabItem("🔧 System Status"):
-                        system_status = gr.Markdown()
-                    
-                    with gr.TabItem("🎓 ML Training"):
-                        training_summary = gr.Markdown()
+                    # Removed System Status and ML Training tabs from the main flow to reduce clutter
         
         # Tips section
         gr.Markdown("""
@@ -993,7 +992,7 @@ def create_enhanced_interface():
         process_btn.click(
             fn=process_document_ui,
             inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
-            outputs=[result_image, quality_overlay_image, ocr_overlay_image, result_table, result_summary, quality_display, session_id_display]
+            outputs=[result_image, quality_overlay_image, preprocessed_image, result_table, result_summary, quality_display, session_id_display]
         )
 
         # (Removed redundant click handler that returned gr.update())
@@ -1004,15 +1003,7 @@ def create_enhanced_interface():
             outputs=[feedback_result]
         )
         
-        status_btn.click(
-            fn=processor.get_system_status,
-            outputs=[system_status]
-        )
-        
-        training_btn.click(
-            fn=get_training_summary,
-            outputs=[training_summary]
-        )
+        # Remove handlers tied to removed tabs
     
     return demo
 

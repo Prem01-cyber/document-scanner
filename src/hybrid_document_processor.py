@@ -32,7 +32,7 @@ class GoogleOCRProcessor:
             logger.error(f"Failed to initialize Google Cloud Vision client: {e}")
             raise HTTPException(status_code=500, detail="Google Cloud Vision API not configured")
     
-    def extract_text_with_bounds(self, image_bytes: bytes):
+    def extract_text_with_bounds(self, image_bytes: bytes, preprocess_options: dict | None = None):
         """Extract text with bounding boxes - returns structured blocks, raw text, and preprocessed image bytes
         Applies basic preprocessing (deskew, denoise, adaptive threshold) before OCR.
         """
@@ -46,7 +46,7 @@ class GoogleOCRProcessor:
             if img_cv is None:
                 raise Exception("Invalid image data for OCR")
 
-            processed = self._preprocess_for_ocr(img_cv)
+            processed, H_src_to_proc = self._preprocess_for_ocr(img_cv, preprocess_options)
             success, processed_buf = cv2.imencode('.png', processed)
             if not success:
                 raise Exception("Failed to encode preprocessed image")
@@ -70,16 +70,34 @@ class GoogleOCRProcessor:
                             word_text = "".join([symbol.text for symbol in word.symbols])
                             block_text += word_text + " "
                     
-                    # Get bounding box
+                    # Get bounding box in processed space and map back to source using inverse transform
                     vertices = block.bounding_box.vertices
-                    x_coords = [v.x for v in vertices]
-                    y_coords = [v.y for v in vertices]
-                    
+                    pts_proc = np.array([[v.x, v.y, 1.0] for v in vertices], dtype=np.float32).T  # 3xN
+                    H_inv = None
+                    try:
+                        H_inv = np.linalg.inv(H_src_to_proc)
+                    except Exception:
+                        H_inv = None
+
+                    if H_inv is not None:
+                        pts_src_h = H_inv @ pts_proc
+                        pts_src_h /= np.maximum(pts_src_h[2, :], 1e-6)
+                        xs = pts_src_h[0, :]
+                        ys = pts_src_h[1, :]
+                    else:
+                        xs = np.array([v.x for v in vertices], dtype=np.float32)
+                        ys = np.array([v.y for v in vertices], dtype=np.float32)
+
+                    x_min = int(np.clip(xs.min(), 0, img_cv.shape[1] - 1))
+                    y_min = int(np.clip(ys.min(), 0, img_cv.shape[0] - 1))
+                    x_max = int(np.clip(xs.max(), 0, img_cv.shape[1] - 1))
+                    y_max = int(np.clip(ys.max(), 0, img_cv.shape[0] - 1))
+
                     bbox = BoundingBox(
-                        x=min(x_coords),
-                        y=min(y_coords),
-                        width=max(x_coords) - min(x_coords),
-                        height=max(y_coords) - min(y_coords)
+                        x=x_min,
+                        y=y_min,
+                        width=max(1, x_max - x_min),
+                        height=max(1, y_max - y_min)
                     )
                     
                     if block_text.strip():
@@ -103,16 +121,23 @@ class GoogleOCRProcessor:
             logger.error(f"OCR processing error: {e}")
             raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
 
-    def _preprocess_for_ocr(self, image_bgr: np.ndarray) -> np.ndarray:
+    def _preprocess_for_ocr(self, image_bgr: np.ndarray, options: dict | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Apply perspective correction, denoise, illumination normalization, deskew, advanced binarization,
         morphology cleanup, and line removal to improve OCR robustness.
         Returns a single-channel 8-bit preprocessed image.
         """
+        # Default options
+        opts = options or {}
+        auto = bool(opts.get("auto_mode", True))
+        enable_persp = bool(opts.get("enable_perspective", True)) if not auto else True
+        enable_lines = bool(opts.get("enable_line_removal", True)) if not auto else True
+        enable_sharp = bool(opts.get("enable_sharpen", True)) if not auto else True
+
         # 1) Grayscale
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
         # 2) (Optional) Perspective correction by detecting document contour
-        corrected = self._perspective_correction(gray)
+        corrected, H_src_to_corr = self._perspective_correction(gray) if enable_persp else (gray, np.eye(3, dtype=np.float32))
 
         # 3) If very small, upscale slightly for better readability
         corrected = self._maybe_super_res(corrected)
@@ -122,10 +147,10 @@ class GoogleOCRProcessor:
         norm = self._illumination_normalize(denoised)
 
         # 5) Light sharpening (unsharp mask)
-        sharp = self._unsharp_mask(norm, amount=1.0, threshold=3)
+        sharp = self._unsharp_mask(norm, amount=1.0, threshold=3) if enable_sharp else norm
 
         # 6) Estimate skew and deskew
-        deskewed = self._deskew_by_hough(sharp)
+        deskewed, H_corr_to_desk = self._deskew_by_hough(sharp)
 
         # 7) Advanced binarization: compare Otsu, Sauvola, and adaptive Gaussian; choose best by edge metric
         binary = self._advanced_binarization(deskewed)
@@ -134,12 +159,15 @@ class GoogleOCRProcessor:
         cleaned = self._morphology_cleanup(binary)
 
         # 9) Line removal (table lines) to avoid interfering with OCR
-        no_lines = self._remove_lines(cleaned)
+        no_lines = self._remove_lines(cleaned) if enable_lines else cleaned
 
-        return no_lines
+        # Compose homography from source to processed for bbox back-mapping
+        H_src_to_proc = H_corr_to_desk @ H_src_to_corr
+        return no_lines, H_src_to_proc
 
-    def _perspective_correction(self, gray: np.ndarray) -> np.ndarray:
+    def _perspective_correction(self, gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         img = gray
+        H = np.eye(3, dtype=np.float32)
         try:
             small = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5) if max(gray.shape) > 1400 else gray
             edges = cv2.Canny(small, 50, 150)
@@ -164,13 +192,13 @@ class GoogleOCRProcessor:
                     scale_y = gray.shape[0] / h_s
                     pts[:, 0] *= scale_x
                     pts[:, 1] *= scale_y
-                warped = self._four_point_transform(gray, pts)
-                return warped
+                warped, H = self._four_point_transform(gray, pts)
+                return warped, H
         except Exception:
             pass
-        return img
+        return img, H
 
-    def _four_point_transform(self, img: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    def _four_point_transform(self, img: np.ndarray, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # order points: top-left, top-right, bottom-right, bottom-left
         rect = np.zeros((4, 2), dtype="float32")
         s = pts.sum(axis=1)
@@ -189,7 +217,7 @@ class GoogleOCRProcessor:
         dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype="float32")
         M = cv2.getPerspectiveTransform(rect, dst)
         warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        return warped
+        return warped, M
 
     def _illumination_normalize(self, gray: np.ndarray) -> np.ndarray:
         # CLAHE
@@ -208,7 +236,7 @@ class GoogleOCRProcessor:
             sharp = np.where(low_contrast_mask == 255, img, sharp).astype(np.uint8)
         return sharp
 
-    def _deskew_by_hough(self, gray: np.ndarray) -> np.ndarray:
+    def _deskew_by_hough(self, gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         edges = cv2.Canny(gray, 50, 150, apertureSize=3)
         lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=180)
         angle_deg = 0.0
@@ -224,8 +252,13 @@ class GoogleOCRProcessor:
             h, w = gray.shape
             center = (w // 2, h // 2)
             rot_mat = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
-            return cv2.warpAffine(gray, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        return gray
+            warped = cv2.warpAffine(gray, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            # Promote to 3x3 homography
+            H = np.array([[rot_mat[0,0], rot_mat[0,1], rot_mat[0,2]],
+                          [rot_mat[1,0], rot_mat[1,1], rot_mat[1,2]],
+                          [0, 0, 1]], dtype=np.float32)
+            return warped, H
+        return gray, np.eye(3, dtype=np.float32)
 
     def _advanced_binarization(self, gray: np.ndarray) -> np.ndarray:
         # Otsu
@@ -324,7 +357,7 @@ class HybridDocumentProcessor:
         # Metrics
         self._hist_total = Histogram("scanner_pipeline_seconds", "Total pipeline time in seconds")
         
-    def process_image_bytes(self, image_bytes: bytes, document_type: str = "document") -> Dict:
+    def process_image_bytes(self, image_bytes: bytes, document_type: str = "document", preprocess_options: dict | None = None, roi: dict | None = None, append_mode: bool = False, previous_pairs: List[Dict] | None = None) -> Dict:
         """Process image from bytes with hybrid extraction"""
         try:
             # Convert bytes to OpenCV image
@@ -334,13 +367,13 @@ class HybridDocumentProcessor:
             if image is None:
                 raise ValueError("Invalid image format")
                 
-            return self.process_image(image, image_bytes, document_type)
+            return self.process_image(image, image_bytes, document_type, preprocess_options, roi, append_mode, previous_pairs)
             
         except Exception as e:
             logger.error(f"Hybrid image processing error: {e}")
             raise HTTPException(status_code=400, detail=f"Image processing failed: {e}")
     
-    def process_image(self, image: np.ndarray, image_bytes: bytes, document_type: str = "document") -> Dict:
+    def process_image(self, image: np.ndarray, image_bytes: bytes, document_type: str = "document", preprocess_options: dict | None = None, roi: dict | None = None, append_mode: bool = False, previous_pairs: List[Dict] | None = None) -> Dict:
         """
         Complete hybrid processing pipeline
         """
@@ -371,11 +404,39 @@ class HybridDocumentProcessor:
             
         processing_audit.append(f"✅ Quality OK (confidence: {quality_result['confidence']:.3f})")
         
+        # Optional ROI crop for focused OCR
+        full_image_for_ocr = image
+        roi_info = None
+        if roi:
+            try:
+                x, y, w, h = int(roi.get("x", 0)), int(roi.get("y", 0)), int(roi.get("width", 0)), int(roi.get("height", 0))
+                h_img, w_img = image.shape[:2]
+                x = max(0, min(x, w_img - 1))
+                y = max(0, min(y, h_img - 1))
+                w = max(1, min(w, w_img - x))
+                h = max(1, min(h, h_img - y))
+                full_image_for_ocr = image[y:y+h, x:x+w]
+                roi_info = {"x": x, "y": y, "width": w, "height": h}
+                processing_audit.append(f"🎯 ROI applied: x={x}, y={y}, w={w}, h={h}")
+            except Exception as e:
+                processing_audit.append(f"⚠️ ROI invalid, using full image: {e}")
+
         # Step 2: OCR Processing
         processing_audit.append("📄 Step 2: OCR text extraction")
         try:
             ocr_start = time.time()
-            text_blocks, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(image_bytes)
+            if roi_info is not None:
+                ok, buf = cv2.imencode('.png', full_image_for_ocr)
+                if not ok:
+                    raise Exception("Failed to encode ROI for OCR")
+                roi_bytes = buf.tobytes()
+                text_blocks, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(roi_bytes, preprocess_options or {})
+                # Offset OCR bbox by ROI origin
+                for tb in text_blocks:
+                    tb.bbox.x += roi_info["x"]
+                    tb.bbox.y += roi_info["y"]
+            else:
+                text_blocks, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(image_bytes, preprocess_options or {})
             ocr_time = time.time() - ocr_start
             
             processing_audit.append(f"✅ OCR completed: {len(text_blocks)} blocks, {len(raw_text)} chars in {ocr_time:.3f}s (preprocessed)")
@@ -461,6 +522,16 @@ class HybridDocumentProcessor:
         
         processing_audit.append(f"📊 Final: {len(hybrid_result.pairs)} pairs extracted via {hybrid_result.primary_method}")
         
+        # Merge mode: append new pairs to previous
+        formatted_pairs = self._format_extraction_results(hybrid_result.pairs, text_blocks)
+        if append_mode and previous_pairs:
+            existing = {(p.get("key",""), p.get("value","")) for p in previous_pairs}
+            for fp in formatted_pairs:
+                tup = (fp.get("key",""), fp.get("value",""))
+                if tup not in existing:
+                    previous_pairs.append(fp)
+            formatted_pairs = previous_pairs
+
         # Prepare comprehensive response
         return {
             "status": "success",
@@ -471,7 +542,7 @@ class HybridDocumentProcessor:
                 "processing_time_seconds": ocr_time
             },
             "preprocessed_image_b64": base64.b64encode(preproc_png).decode("ascii") if preproc_png else None,
-            "key_value_pairs": self._format_extraction_results(hybrid_result.pairs),
+            "key_value_pairs": formatted_pairs,
             "extraction_metadata": {
                 "primary_method": hybrid_result.primary_method,
                 "fallback_used": hybrid_result.fallback_used,
@@ -509,9 +580,45 @@ class HybridDocumentProcessor:
             "raw_text_extracted": raw_text[:1000] + "..." if len(raw_text) > 1000 else raw_text  # Truncate for response size
         }
     
-    def _format_extraction_results(self, pairs: List[Union[KeyValuePair, LLMKeyValuePair]]) -> List[Dict]:
-        """Format extraction results for API response"""
+    def _format_extraction_results(self, pairs: List[Union[KeyValuePair, LLMKeyValuePair]], text_blocks=None) -> List[Dict]:
+        """Format extraction results for API response, assigning approximate
+        bounding boxes for LLM-only pairs by aligning to OCR text blocks when available."""
         formatted_pairs = []
+        text_blocks = text_blocks or []
+
+        # Lightweight matcher to map a string to the best OCR block
+        def _best_block_for_text(query: str):
+            if not query or not text_blocks:
+                return None
+            q = str(query).strip().lower()
+            q_tokens = {t for t in q.replace("*", "").split() if t}
+            best = None
+            best_score = 0.0
+            for blk in text_blocks:
+                try:
+                    blk_text = str(blk.text).strip().lower()
+                    blk_tokens = {t for t in blk_text.split() if t}
+                    score = 0.0
+                    # direct substring bonus
+                    if q in blk_text or blk_text in q:
+                        score = max(len(q), len(blk_text)) / (len(q) + len(blk_text) + 1e-6)
+                    # token overlap score
+                    if q_tokens and blk_tokens:
+                        inter = len(q_tokens & blk_tokens)
+                        union = len(q_tokens | blk_tokens)
+                        score = max(score, inter / max(union, 1))
+                    # numeric exact match boost
+                    if q.isdigit() and q == ''.join([c for c in blk_text if c.isdigit()]):
+                        score = 1.0
+                except Exception:
+                    continue
+                if score > best_score:
+                    best_score = score
+                    best = blk
+            # require a minimal score to avoid random boxes
+            if best is not None and best_score >= 0.35:
+                return best
+            return None
         
         for pair in pairs:
             # Handle both adaptive and LLM pairs
@@ -538,11 +645,20 @@ class HybridDocumentProcessor:
                 }
             else:
                 # LLM KeyValuePair without bounding boxes
+                key_blk = _best_block_for_text(getattr(pair, 'key', ''))
+                val_blk = _best_block_for_text(getattr(pair, 'value', ''))
+                def _bbox_dict(blk):
+                    return {
+                        "x": blk.bbox.x,
+                        "y": blk.bbox.y,
+                        "width": blk.bbox.width,
+                        "height": blk.bbox.height
+                    } if blk is not None else None
                 formatted_pair = {
                     "key": pair.key,
                     "value": pair.value,
-                    "key_bbox": None,  # LLM doesn't provide spatial info
-                    "value_bbox": None,
+                    "key_bbox": _bbox_dict(key_blk),
+                    "value_bbox": _bbox_dict(val_blk),
                     "confidence": float(pair.confidence),
                     "extraction_method": pair.extraction_method,
                     "source": "llm",

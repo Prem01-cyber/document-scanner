@@ -101,7 +101,10 @@ class DocumentProcessor:
                 "recommendations": "Some features may not work properly"
             }
     
-    def process_document(self, image, strategy="adaptive_first", confidence=0.5, llm_provider="ollama"):
+    def process_document(self, image, strategy="adaptive_first", confidence=0.5, llm_provider="ollama",
+                         roi: Dict = None, auto_mode: bool = True, enable_perspective: bool = True,
+                         enable_line_removal: bool = True, enable_sharpen: bool = True,
+                         append_mode: bool = False, previous_pairs: List[Dict] = None):
         """Process document with comprehensive error handling"""
         start_time = time.time()
         
@@ -151,7 +154,21 @@ class DocumentProcessor:
             
             # Process document
             logger.info(f"🔄 Processing document with strategy: {strategy}, provider: {llm_provider}")
-            result = self.processor.process_image_bytes(image_bytes, "document")
+            preprocess_options = {
+                "auto_mode": bool(auto_mode),
+                "enable_perspective": bool(enable_perspective),
+                "enable_line_removal": bool(enable_line_removal),
+                "enable_sharpen": bool(enable_sharpen)
+            }
+
+            result = self.processor.process_image_bytes(
+                image_bytes,
+                "document",
+                preprocess_options=preprocess_options,
+                roi=roi,
+                append_mode=bool(append_mode),
+                previous_pairs=previous_pairs or []
+            )
             processing_time = time.time() - start_time
             
             logger.info(f"✅ Document processing completed in {processing_time:.2f}s")
@@ -184,10 +201,8 @@ class DocumentProcessor:
         # Filter pairs based on confidence threshold
         confidence_threshold = self.processor.kv_extractor.adaptive_confidence_threshold
         filtered_pairs = [pair for pair in all_pairs if pair.get("confidence", 0) >= confidence_threshold]
-        
-        # Create annotated image with filtered pairs
-        annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
-        # Preprocessed preview
+
+        # Decode preprocessed image (OCR input) if available
         pre_b64 = result.get("preprocessed_image_b64")
         pre_image = None
         if pre_b64:
@@ -195,6 +210,11 @@ class DocumentProcessor:
                 pre_image = Image.open(io.BytesIO(base64.b64decode(pre_b64)))
             except Exception:
                 pre_image = None
+
+        # Create annotated image on the same canvas used for OCR (preprocessed),
+        # because Google OCR bounding boxes are in that coordinate space
+        base_image_for_annotation = pre_image if pre_image is not None else original_image
+        annotated_image = self._create_enhanced_annotation(base_image_for_annotation, filtered_pairs, confidence_threshold)
         
         # Create table data for filtered pairs
         table_data = []
@@ -302,37 +322,34 @@ class DocumentProcessor:
                 return (0, 100, 255)    # Red for low confidence
         
         # Draw clean bounding boxes
-        for i, pair in enumerate(pairs):
-            confidence = pair.get("confidence", 0)
-            color = get_confidence_color(confidence)
-            
-            # Adjust thickness based on confidence (but keep it reasonable)
-            thickness = 2 if confidence > 0.7 else 1
-            
+        display_index = 1
+        for pair in pairs:
             key_bbox = pair.get("key_bbox")
             value_bbox = pair.get("value_bbox")
-            
-            # Draw key box - clean and simple
+            # Skip pairs without any spatial info (e.g., pure LLM results)
+            if not key_bbox and not value_bbox:
+                continue
+
+            confidence = pair.get("confidence", 0)
+            color = get_confidence_color(confidence)
+            thickness = 2 if confidence > 0.7 else 1
+
             if key_bbox:
                 x, y, w, h = key_bbox["x"], key_bbox["y"], key_bbox["width"], key_bbox["height"]
                 cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
-                
-                # Simple label without confidence score clutter
-                cv2.putText(img_array, f"K{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            
-            # Draw value box - clean and simple  
+                cv2.putText(img_array, f"K{display_index}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
             if value_bbox:
                 x, y, w, h = value_bbox["x"], value_bbox["y"], value_bbox["width"], value_bbox["height"]
                 cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
-                
-                # Simple label
-                cv2.putText(img_array, f"V{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                
-                # Draw clean connection line
+                cv2.putText(img_array, f"V{display_index}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
                 if key_bbox:
                     key_center = (key_bbox["x"] + key_bbox["width"]//2, key_bbox["y"] + key_bbox["height"]//2)
                     value_center = (x + w//2, y + h//2)
                     cv2.line(img_array, key_center, value_center, color, 1)
+
+            display_index += 1
         
         return Image.fromarray(img_array)
 
@@ -404,9 +421,31 @@ def create_modern_interface():
     
     processor = DocumentProcessor()
     
-    def process_document_ui(image, strategy, confidence, llm_provider):
+    def process_document_ui(image, strategy, confidence, llm_provider,
+                            roi_json, auto_mode, enable_perspective, enable_line_removal, enable_sharpen,
+                            append_mode, prev_pairs):
         """Main processing function for UI"""
-        result = processor.process_document(image, strategy, confidence, llm_provider)
+        roi = None
+        # Accept JSON or selection dict from Image(tool='select')
+        if isinstance(roi_json, dict):
+            if 'cropped_region' in roi_json and isinstance(roi_json['cropped_region'], dict):
+                r = roi_json['cropped_region']
+                roi = {"x": int(r.get("x", 0)), "y": int(r.get("y", 0)),
+                       "width": int(r.get("width", 0)), "height": int(r.get("height", 0))}
+            elif all(k in roi_json for k in ("x","y","width","height")):
+                roi = {"x": int(roi_json.get("x", 0)), "y": int(roi_json.get("y", 0)),
+                       "width": int(roi_json.get("width", 0)), "height": int(roi_json.get("height", 0))}
+
+        result = processor.process_document(
+            image, strategy, confidence, llm_provider,
+            roi=roi,
+            auto_mode=auto_mode,
+            enable_perspective=enable_perspective,
+            enable_line_removal=enable_line_removal,
+            enable_sharpen=enable_sharpen,
+            append_mode=append_mode,
+            previous_pairs=prev_pairs or []
+        )
         
         if result["success"]:
             return (
@@ -550,6 +589,17 @@ def create_modern_interface():
                     label="LLM Provider",
                     info="Choose AI provider for LLM strategies (only available providers shown)"
                 )
+
+                gr.Markdown("### 🎛️ Preprocessing Controls")
+                auto_mode_toggle = gr.Checkbox(value=True, label="Auto mode (pick best binarization)")
+                enable_perspective_toggle = gr.Checkbox(value=True, label="Enable perspective correction")
+                enable_line_removal_toggle = gr.Checkbox(value=True, label="Enable line removal")
+                enable_sharpen_toggle = gr.Checkbox(value=True, label="Enable sharpening")
+
+                gr.Markdown("### 🎯 Focus Region (optional)")
+                roi_box = gr.Image(type="pil", label="Draw selection to focus", tool="select", interactive=True)
+                append_mode_toggle = gr.Checkbox(value=False, label="Append to previous results")
+                prev_pairs_state = gr.State([])
                 
 
                 
@@ -648,7 +698,9 @@ def create_modern_interface():
         # Event handlers
         process_btn.click(
             fn=process_document_ui,
-            inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
+            inputs=[image_input, strategy_input, confidence_input, llm_provider_input,
+                    roi_box, auto_mode_toggle, enable_perspective_toggle, enable_line_removal_toggle, enable_sharpen_toggle,
+                    append_mode_toggle, prev_pairs_state],
             outputs=[result_image, preprocessed_image, result_table, result_summary]
         )
         

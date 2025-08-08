@@ -76,7 +76,10 @@ class EnhancedDocumentProcessor:
             self.system_ready = False
             logger.error(f"Failed to initialize processor: {e}")
     
-    def process_document_with_quality(self, image, strategy="adaptive_first", confidence=0.5, llm_provider="ollama"):
+    def process_document_with_quality(self, image, strategy="adaptive_first", confidence=0.5, llm_provider="ollama",
+                                     roi: Dict = None, auto_mode: bool = True, enable_perspective: bool = True,
+                                     enable_line_removal: bool = True, enable_sharpen: bool = True,
+                                     append_mode: bool = False, previous_pairs: List[Dict] = None):
         """Process document with comprehensive quality assessment"""
         start_time = time.time()
         session_id = f"gradio_{int(time.time())}"
@@ -125,7 +128,20 @@ class EnhancedDocumentProcessor:
             
             # Process document
             logger.info(f"🔄 Processing document with strategy: {strategy}, provider: {llm_provider}")
-            result = self.processor.process_image_bytes(image_bytes, "document")
+            preprocess_options = {
+                "auto_mode": bool(auto_mode),
+                "enable_perspective": bool(enable_perspective),
+                "enable_line_removal": bool(enable_line_removal),
+                "enable_sharpen": bool(enable_sharpen)
+            }
+            result = self.processor.process_image_bytes(
+                image_bytes,
+                "document",
+                preprocess_options=preprocess_options,
+                roi=roi,
+                append_mode=bool(append_mode),
+                previous_pairs=previous_pairs or []
+            )
             processing_time = time.time() - start_time
             
             # Update quality stats
@@ -177,10 +193,8 @@ class EnhancedDocumentProcessor:
         all_pairs = result.get("key_value_pairs", [])
         confidence_threshold = self.processor.kv_extractor.adaptive_confidence_threshold
         filtered_pairs = [pair for pair in all_pairs if pair.get("confidence", 0) >= confidence_threshold]
-        
-        # Create annotated image
-        annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
-        # Preprocessed preview from backend
+
+        # Decode preprocessed image (OCR input) if available
         pre_b64 = result.get("preprocessed_image_b64")
         pre_image = None
         if pre_b64:
@@ -188,6 +202,11 @@ class EnhancedDocumentProcessor:
                 pre_image = Image.open(io.BytesIO(base64.b64decode(pre_b64)))
             except Exception:
                 pre_image = None
+
+        # Create annotated image on the preprocessed canvas when available,
+        # because Google OCR bounding boxes are relative to that image
+        base_image_for_annotation = pre_image if pre_image is not None else original_image
+        annotated_image = self._create_enhanced_annotation(base_image_for_annotation, filtered_pairs, confidence_threshold)
         
         # Create quality overlay image if available
         quality_overlay_image = None
@@ -362,29 +381,34 @@ class EnhancedDocumentProcessor:
                 return (0, 100, 255)    # Red
         
         # Draw bounding boxes
-        for i, pair in enumerate(pairs):
+        display_index = 1
+        for pair in pairs:
+            key_bbox = pair.get("key_bbox")
+            value_bbox = pair.get("value_bbox")
+            # Skip non-spatial LLM pairs so overlay reflects only items with coordinates
+            if not key_bbox and not value_bbox:
+                continue
+
             confidence = pair.get("confidence", 0)
             color = get_confidence_color(confidence)
             thickness = 2 if confidence > 0.7 else 1
-            
-            key_bbox = pair.get("key_bbox")
-            value_bbox = pair.get("value_bbox")
-            
+
             if key_bbox:
                 x, y, w, h = key_bbox["x"], key_bbox["y"], key_bbox["width"], key_bbox["height"]
                 cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
-                cv2.putText(img_array, f"K{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            
+                cv2.putText(img_array, f"K{display_index}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
             if value_bbox:
                 x, y, w, h = value_bbox["x"], value_bbox["y"], value_bbox["width"], value_bbox["height"]
                 cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
-                cv2.putText(img_array, f"V{i+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                
-                # Connection line
+                cv2.putText(img_array, f"V{display_index}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
                 if key_bbox:
                     key_center = (key_bbox["x"] + key_bbox["width"]//2, key_bbox["y"] + key_bbox["height"]//2)
                     value_center = (x + w//2, y + h//2)
                     cv2.line(img_array, key_center, value_center, color, 1)
+
+            display_index += 1
         
         return Image.fromarray(img_array)
 
@@ -459,9 +483,30 @@ def create_enhanced_interface():
     
     processor = EnhancedDocumentProcessor()
     
-    def process_document_ui(image, strategy, confidence, llm_provider):
+    def process_document_ui(image, strategy, confidence, llm_provider,
+                            use_roi, roi_x, roi_y, roi_w, roi_h,
+                            auto_mode, enable_perspective, enable_line_removal, enable_sharpen,
+                            append_mode, prev_pairs):
         """Main processing function for UI"""
-        result = processor.process_document_with_quality(image, strategy, confidence, llm_provider)
+        roi = None
+        if use_roi:
+            try:
+                rx, ry, rw, rh = int(roi_x or 0), int(roi_y or 0), int(roi_w or 0), int(roi_h or 0)
+                if rw > 0 and rh > 0:
+                    roi = {"x": rx, "y": ry, "width": rw, "height": rh}
+            except Exception:
+                roi = None
+
+        result = processor.process_document_with_quality(
+            image, strategy, confidence, llm_provider,
+            roi=roi,
+            auto_mode=auto_mode,
+            enable_perspective=enable_perspective,
+            enable_line_removal=enable_line_removal,
+            enable_sharpen=enable_sharpen,
+            append_mode=append_mode,
+            previous_pairs=prev_pairs or []
+        )
         
         if result["success"]:
             # Format detailed quality assessment
@@ -877,6 +922,22 @@ def create_enhanced_interface():
                     value="ollama",
                     label="LLM Provider"
                 )
+
+                gr.Markdown("### 🎛️ Preprocessing Controls")
+                auto_mode_toggle = gr.Checkbox(value=True, label="Auto mode (pick best binarization)")
+                enable_perspective_toggle = gr.Checkbox(value=True, label="Enable perspective correction")
+                enable_line_removal_toggle = gr.Checkbox(value=True, label="Enable line removal")
+                enable_sharpen_toggle = gr.Checkbox(value=True, label="Enable sharpening")
+
+                gr.Markdown("### 🎯 Focus Region (optional)")
+                use_roi_toggle = gr.Checkbox(value=False, label="Enable ROI")
+                with gr.Row():
+                    roi_x = gr.Number(value=0, label="x")
+                    roi_y = gr.Number(value=0, label="y")
+                    roi_w = gr.Number(value=0, label="width")
+                    roi_h = gr.Number(value=0, label="height")
+                append_mode_toggle = gr.Checkbox(value=False, label="Append to previous results")
+                prev_pairs_state = gr.State([])
                 
                 process_btn = gr.Button(
                     "🚀 Process Document",
@@ -991,7 +1052,10 @@ def create_enhanced_interface():
         # Event handlers
         process_btn.click(
             fn=process_document_ui,
-            inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
+            inputs=[image_input, strategy_input, confidence_input, llm_provider_input,
+                    use_roi_toggle, roi_x, roi_y, roi_w, roi_h,
+                    auto_mode_toggle, enable_perspective_toggle, enable_line_removal_toggle, enable_sharpen_toggle,
+                    append_mode_toggle, prev_pairs_state],
             outputs=[result_image, quality_overlay_image, preprocessed_image, result_table, result_summary, quality_display, session_id_display]
         )
 

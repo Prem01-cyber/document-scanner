@@ -10,6 +10,7 @@ from enum import Enum
 
 from .adaptive_kv_extractor import AdaptiveKeyValueExtractor, TextBlock, KeyValuePair
 from .llm_kv_extractor import LLMKeyValueExtractor, LLMKeyValuePair, LLMProvider
+from prometheus_client import Histogram
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class HybridExtractionResult:
     confidence_scores: Dict[str, float]
     method_comparison: Dict[str, Any]
     audit_trail: List[str]
+    llm_usage: Optional[Dict[str, Any]] = None
 
 class HybridKeyValueExtractor:
     """
@@ -43,6 +45,8 @@ class HybridKeyValueExtractor:
                  adaptive_confidence_threshold: float = 0.5,
                  min_pairs_threshold: int = 2,
                  llm_provider: LLMProvider = LLMProvider.OPENAI,
+                 llm_request_timeout_seconds: int = 40,
+                 llm_max_retries: int = 2,
                  enable_learning: bool = True):
         
         self.strategy = strategy
@@ -52,7 +56,15 @@ class HybridKeyValueExtractor:
         
         # Initialize extractors
         self.adaptive_extractor = AdaptiveKeyValueExtractor()
-        self.llm_extractor = LLMKeyValueExtractor(primary_provider=llm_provider)
+        self.llm_extractor = LLMKeyValueExtractor(
+            primary_provider=llm_provider,
+            request_timeout_seconds=llm_request_timeout_seconds,
+            max_retries=llm_max_retries,
+        )
+
+        # Metrics
+        self._hist_adaptive = Histogram("scanner_adaptive_seconds", "Adaptive extraction latency in seconds")
+        self._hist_llm = Histogram("scanner_llm_seconds", "LLM extraction latency in seconds")
         
         # Performance tracking
         self.performance_stats = {
@@ -140,6 +152,10 @@ class HybridKeyValueExtractor:
         adaptive_start = time.time()
         adaptive_pairs = self.adaptive_extractor.extract_key_value_pairs(text_blocks)
         adaptive_time = time.time() - adaptive_start
+        try:
+            self._hist_adaptive.observe(adaptive_time)
+        except Exception:
+            pass
         
         audit_trail.append(f"🔧 Adaptive extraction: {len(adaptive_pairs)} pairs in {adaptive_time:.3f}s")
         
@@ -183,6 +199,10 @@ class HybridKeyValueExtractor:
         llm_start = time.time()
         llm_pairs = self.llm_extractor.extract_key_value_pairs(raw_text, document_type)
         llm_time = time.time() - llm_start
+        try:
+            self._hist_llm.observe(llm_time)
+        except Exception:
+            pass
         
         audit_trail.append(f"🤖 LLM extraction: {len(llm_pairs)} pairs in {llm_time:.3f}s")
         
@@ -201,6 +221,18 @@ class HybridKeyValueExtractor:
             primary_method = "adaptive_fallback"
             final_pairs = adaptive_pairs
         
+        # Build LLM usage metadata if available
+        llm_usage = None
+        if llm_pairs:
+            meta = getattr(llm_pairs[0], "response_metadata", {}) or {}
+            llm_usage = {
+                "model": meta.get("model"),
+                "tokens_input": meta.get("tokens_input"),
+                "tokens_output": meta.get("tokens_output"),
+                "estimated_cost_usd": meta.get("estimated_cost_usd"),
+                "latency_seconds": llm_time,
+            }
+
         return HybridExtractionResult(
             pairs=final_pairs,
             primary_method=primary_method,
@@ -216,7 +248,8 @@ class HybridKeyValueExtractor:
                 "adaptive_time": adaptive_time,
                 "llm_time": llm_time
             },
-            audit_trail=[]
+            audit_trail=[],
+            llm_usage=llm_usage,
         )
     
     def _llm_first_strategy(self, text_blocks: List[TextBlock], raw_text: str, 
@@ -260,6 +293,10 @@ class HybridKeyValueExtractor:
         adaptive_start = time.time()
         adaptive_pairs = self.adaptive_extractor.extract_key_value_pairs(text_blocks)
         adaptive_time = time.time() - adaptive_start
+        try:
+            self._hist_adaptive.observe(adaptive_time)
+        except Exception:
+            pass
         
         audit_trail.append(f"🔧 Adaptive extraction: {len(adaptive_pairs)} pairs in {adaptive_time:.3f}s")
         
@@ -314,6 +351,10 @@ class HybridKeyValueExtractor:
             llm_start = time.time()
             llm_pairs = self.llm_extractor.extract_key_value_pairs(raw_text, document_type)
             llm_time = time.time() - llm_start
+            try:
+                self._hist_llm.observe(llm_time)
+            except Exception:
+                pass
             audit_trail.append(f"🤖 LLM extraction: {len(llm_pairs)} pairs in {llm_time:.3f}s")
             llm_confidence = self._calculate_llm_confidence(llm_pairs)
         else:
@@ -326,6 +367,18 @@ class HybridKeyValueExtractor:
         
         self.performance_stats["parallel_runs"] += 1
         
+        # LLM usage metadata
+        llm_usage = None
+        if llm_pairs:
+            meta = getattr(llm_pairs[0], "response_metadata", {}) or {}
+            llm_usage = {
+                "model": meta.get("model"),
+                "tokens_input": meta.get("tokens_input"),
+                "tokens_output": meta.get("tokens_output"),
+                "estimated_cost_usd": meta.get("estimated_cost_usd"),
+                "latency_seconds": llm_time,
+            }
+
         return HybridExtractionResult(
             pairs=merged_pairs,
             primary_method="parallel_merged",
@@ -343,7 +396,8 @@ class HybridKeyValueExtractor:
                 "adaptive_time": adaptive_time,
                 "llm_time": llm_time
             },
-            audit_trail=[]
+            audit_trail=[],
+            llm_usage=llm_usage,
         )
     
     def _confidence_based_strategy(self, text_blocks: List[TextBlock], raw_text: str, 
@@ -411,6 +465,17 @@ class HybridKeyValueExtractor:
         
         llm_confidence = self._calculate_llm_confidence(llm_pairs)
         
+        llm_usage = None
+        if llm_pairs:
+            meta = getattr(llm_pairs[0], "response_metadata", {}) or {}
+            llm_usage = {
+                "model": meta.get("model"),
+                "tokens_input": meta.get("tokens_input"),
+                "tokens_output": meta.get("tokens_output"),
+                "estimated_cost_usd": meta.get("estimated_cost_usd"),
+                "latency_seconds": llm_time,
+            }
+
         return HybridExtractionResult(
             pairs=llm_pairs,
             primary_method="llm_only",
@@ -418,7 +483,8 @@ class HybridKeyValueExtractor:
             extraction_time_seconds=llm_time,
             confidence_scores={"llm": llm_confidence},
             method_comparison={"llm_pairs": len(llm_pairs)},
-            audit_trail=[]
+            audit_trail=[],
+            llm_usage=llm_usage,
         )
     
     def _calculate_confidence(self, pairs: List[KeyValuePair]) -> float:

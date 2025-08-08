@@ -51,8 +51,12 @@ class AdaptiveKeyValueExtractor:
     """
     
     def __init__(self):
-        # Load spaCy model
-        self.nlp = self._load_best_spacy_model()
+        # Load spaCy model (cached)
+        try:
+            from .nlp_cache import get_spacy_model
+            self.nlp = get_spacy_model()
+        except Exception:
+            self.nlp = self._load_best_spacy_model()
         
         # Dynamic learning structures
         self.learned_patterns = {}

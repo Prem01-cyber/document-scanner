@@ -239,8 +239,10 @@ LOG_LEVEL=INFO
             self.log_error(f"System test failed: {e}")
             return False
     
-    def run_ui(self, port: Optional[int] = None):
-        """Launch enhanced Gradio UI"""
+    def run_ui(self, port: Optional[int] = None, variant: str = "enhanced"):
+        """Launch Gradio UI.
+        variant: 'enhanced' (default) or 'basic' to launch original UI.
+        """
         port = port or self.config.get("ui_port", 7861)
         
         self.log_info(f"🚀 Starting Enhanced Gradio UI on port {port}...")
@@ -255,17 +257,16 @@ LOG_LEVEL=INFO
             env = os.environ.copy()
             env['PYTHONPATH'] = str(self.project_root)
             
-            # Start the UI
+            # Choose UI app
+            app_script = "enhanced_gradio_app.py" if variant == "enhanced" else "gradio_app.py"
             process = subprocess.Popen([
-                sys.executable, "enhanced_gradio_app.py"
+                sys.executable, app_script
             ], cwd=self.project_root, env=env)
             
             self.processes['ui'] = process
             
-            self.log_success(f"✅ Enhanced UI started successfully!")
+            self.log_success(f"✅ UI started successfully! ({variant})")
             self.log_info(f"🌐 Open browser: http://localhost:{port}")
-            self.log_info("📊 Features: Rule-based + ML quality assessment")
-            self.log_info("🎓 ML training data collection enabled")
             self.log_info("\nPress Ctrl+C to stop")
             
             # Wait for process
@@ -650,6 +651,7 @@ Examples:
     
     parser.add_argument('subcommand', nargs='?', help='Subcommand (e.g., demo name)')
     parser.add_argument('--port', type=int, help='Port number for services')
+    parser.add_argument('--ui', choices=['enhanced', 'basic'], default='enhanced', help='UI variant to run')
     
     args = parser.parse_args()
     
@@ -661,7 +663,7 @@ Examples:
             sys.exit(0 if success else 1)
             
         elif args.command == 'ui':
-            runner.run_ui(args.port)
+            runner.run_ui(args.port, args.ui)
             
         elif args.command == 'api':
             runner.run_api(args.port)

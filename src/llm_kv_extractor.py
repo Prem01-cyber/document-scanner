@@ -7,6 +7,8 @@ import os
 import logging
 import traceback
 from typing import Dict, List, Optional, Tuple, Any
+import hashlib
+import time
 from dataclasses import dataclass
 from enum import Enum
 from dotenv import load_dotenv
@@ -43,12 +45,16 @@ class LLMKeyValueExtractor:
                  primary_provider: LLMProvider = LLMProvider.OPENAI,
                  fallback_providers: List[LLMProvider] = None,
                  temperature: float = 0.1,
-                 max_tokens: int = 1000):
+                 max_tokens: int = 1000,
+                 request_timeout_seconds: int = 40,
+                 max_retries: int = 2):
         
         self.primary_provider = primary_provider
         self.fallback_providers = fallback_providers or [LLMProvider.OLLAMA]
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.request_timeout_seconds = request_timeout_seconds
+        self.max_retries = max_retries
         
         # Initialize available providers
         self.available_providers = {}
@@ -59,8 +65,18 @@ class LLMKeyValueExtractor:
             "total_requests": 0,
             "successful_extractions": 0,
             "provider_usage": {},
-            "average_pairs_extracted": 0.0
+            "average_pairs_extracted": 0.0,
+            "total_llm_ms": 0.0,
+            "total_llm_cost_usd": 0.0
         }
+
+        # Simple in-memory prompt cache (hash->pairs)
+        self._prompt_cache: Dict[str, List[LLMKeyValuePair]] = {}
+
+        # Last-request metadata
+        self._last_request_cost_usd: float = 0.0
+        self._last_request_tokens_input: int = 0
+        self._last_request_tokens_output: int = 0
     
     def _initialize_providers(self):
         """Initialize available LLM providers"""
@@ -184,13 +200,14 @@ TASK: Extract ALL key-value pairs from the text below. Focus on:
 - Document metadata (issue dates, validity, etc.)
 - Contact information (phone, email, etc.)
 
-RULES:
-1. Return ONLY valid JSON format: {{"key": "value", "key2": "value2"}}
+        RULES:
+        1. Return ONLY valid JSON object with flat key/value pairs, no arrays, no nested objects: {{"key": "value", "key2": "value2"}}
 2. Use clear, descriptive keys (e.g., "Full Name" not just "Name")
 3. Preserve original values exactly as written
 4. Skip empty, unclear, or duplicate information
 5. For dates, keep original format
 6. If uncertain about a pairing, include it with a clear key
+        7. Do not include any trailing commentary. Output must be a single JSON object only.
 
 DOCUMENT TYPE: {document_type}
 
@@ -216,6 +233,13 @@ JSON OUTPUT:"""
         logger.info(f"📋 Document type: {document_type}")
         logger.info(f"🔧 Available providers: {list(self.available_providers.keys())}")
         
+        # Hash for caching
+        prompt = self.build_extraction_prompt(text, document_type)
+        cache_key = hashlib.sha256((self.primary_provider.value + "::" + prompt).encode("utf-8")).hexdigest()
+        if cache_key in self._prompt_cache:
+            logger.info("🔁 LLM cache hit for prompt")
+            return self._prompt_cache[cache_key]
+
         # Try providers in order of preference
         providers_to_try = [self.primary_provider] + self.fallback_providers
         logger.info(f"🔄 Provider priority: {[p.value for p in providers_to_try]}")
@@ -227,11 +251,24 @@ JSON OUTPUT:"""
             
             try:
                 logger.info(f"🚀 Attempting LLM extraction with {provider.value}")
+                start_ms = time.time()
                 
-                # Extract using this provider
-                result = self._extract_with_provider(provider, text, document_type)
+                # Extract using this provider with retries
+                last_exc = None
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        result = self._extract_with_provider(provider, text, document_type)
+                        break
+                    except Exception as e:
+                        last_exc = e
+                        logger.warning(f"LLM provider {provider.value} attempt {attempt+1} failed: {e}")
+                        if attempt == self.max_retries:
+                            raise
+                        continue
                 
                 if result:
+                    elapsed_ms = (time.time() - start_ms) * 1000.0
+                    self.extraction_stats["total_llm_ms"] += elapsed_ms
                     self.extraction_stats["successful_extractions"] += 1
                     self.extraction_stats["provider_usage"][provider.value] = \
                         self.extraction_stats["provider_usage"].get(provider.value, 0) + 1
@@ -241,9 +278,11 @@ JSON OUTPUT:"""
                          (self.extraction_stats["successful_extractions"] - 1) + len(result)) / \
                         self.extraction_stats["successful_extractions"]
                     
-                    logger.info(f"✅ LLM extraction successful with {provider.value}: {len(result)} pairs")
+                    logger.info(f"✅ LLM extraction successful with {provider.value}: {len(result)} pairs in {elapsed_ms:.1f} ms")
                     for i, pair in enumerate(result):
                         logger.info(f"   {i+1}. {pair.key} → {pair.value} (conf: {pair.confidence:.2f})")
+                    # Cache success
+                    self._prompt_cache[cache_key] = result
                     return result
                 else:
                     logger.warning(f"⚠️  No pairs extracted with {provider.value}")
@@ -276,6 +315,17 @@ JSON OUTPUT:"""
         
         else:
             raise ValueError(f"Unsupported provider: {provider}")
+
+    def _estimate_openai_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        """Best-effort cost estimate in USD for common OpenAI models."""
+        # Rough per-1K token rates (subject to change). Adjust as needed.
+        pricing = {
+            "gpt-4o-mini": (0.005, 0.015),  # (input, output) per 1K tok
+            "gpt-4o": (0.005, 0.015),
+            "gpt-3.5-turbo": (0.0005, 0.0015),
+        }
+        inp, out = pricing.get(model, (0.0, 0.0))
+        return (prompt_tokens / 1000.0) * inp + (completion_tokens / 1000.0) * out
     
     def _extract_openai(self, config: Dict, prompt: str, provider_name: str) -> List[LLMKeyValuePair]:
         """Extract using OpenAI GPT"""
@@ -292,9 +342,19 @@ JSON OUTPUT:"""
             )
             
             content = response.choices[0].message.content
+            # Token accounting (best-effort)
+            in_toks = getattr(getattr(response, "usage", None), "prompt_tokens", 0) or getattr(getattr(response, "usage", None), "input_tokens", 0) or 0
+            out_toks = getattr(getattr(response, "usage", None), "completion_tokens", 0) or getattr(getattr(response, "usage", None), "output_tokens", 0) or 0
+            self._last_request_tokens_input = int(in_toks)
+            self._last_request_tokens_output = int(out_toks)
+            self._last_request_cost_usd = self._estimate_openai_cost(config["model"], self._last_request_tokens_input, self._last_request_tokens_output)
+            self.extraction_stats["total_llm_cost_usd"] += self._last_request_cost_usd
+
             return self._parse_llm_response(content, provider_name, {
                 "model": config["model"],
-                "tokens_used": response.usage.total_tokens if response.usage else 0
+                "tokens_input": self._last_request_tokens_input,
+                "tokens_output": self._last_request_tokens_output,
+                "estimated_cost_usd": self._last_request_cost_usd
             })
             
         except Exception as e:
@@ -311,7 +371,18 @@ JSON OUTPUT:"""
                     max_tokens=self.max_tokens
                 )
                 content = response.choices[0].message.content
-                return self._parse_llm_response(content, provider_name, {"model": config["backup_model"]})
+                in_toks = getattr(getattr(response, "usage", None), "prompt_tokens", 0) or getattr(getattr(response, "usage", None), "input_tokens", 0) or 0
+                out_toks = getattr(getattr(response, "usage", None), "completion_tokens", 0) or getattr(getattr(response, "usage", None), "output_tokens", 0) or 0
+                self._last_request_tokens_input = int(in_toks)
+                self._last_request_tokens_output = int(out_toks)
+                self._last_request_cost_usd = self._estimate_openai_cost(config["backup_model"], self._last_request_tokens_input, self._last_request_tokens_output)
+                self.extraction_stats["total_llm_cost_usd"] += self._last_request_cost_usd
+                return self._parse_llm_response(content, provider_name, {
+                    "model": config["backup_model"],
+                    "tokens_input": self._last_request_tokens_input,
+                    "tokens_output": self._last_request_tokens_output,
+                    "estimated_cost_usd": self._last_request_cost_usd
+                })
             else:
                 raise e
     
@@ -328,9 +399,17 @@ JSON OUTPUT:"""
             )
             
             content = response.content[0].text
+            in_toks = getattr(getattr(response, "usage", None), "input_tokens", 0) or 0
+            out_toks = getattr(getattr(response, "usage", None), "output_tokens", 0) or 0
+            self._last_request_tokens_input = int(in_toks)
+            self._last_request_tokens_output = int(out_toks)
+            # Cost estimation for Anthropic not implemented - set to 0
+            self._last_request_cost_usd = 0.0
             return self._parse_llm_response(content, provider_name, {
                 "model": config["model"],
-                "tokens_used": response.usage.input_tokens + response.usage.output_tokens
+                "tokens_input": self._last_request_tokens_input,
+                "tokens_output": self._last_request_tokens_output,
+                "estimated_cost_usd": self._last_request_cost_usd
             })
             
         except Exception as e:
@@ -364,12 +443,17 @@ JSON OUTPUT:"""
                         "num_predict": self.max_tokens
                     }
                 },
-                timeout=30
+                timeout=self.request_timeout_seconds
             )
             
             if response.status_code == 200:
                 content = response.json()["response"]
-                return self._parse_llm_response(content, provider_name, {"model": config["model"]})
+                return self._parse_llm_response(content, provider_name, {
+                    "model": config["model"],
+                    "tokens_input": None,
+                    "tokens_output": None,
+                    "estimated_cost_usd": 0.0
+                })
             else:
                 raise Exception(f"Ollama request failed: {response.status_code}")
                 
@@ -385,11 +469,16 @@ JSON OUTPUT:"""
                         "stream": False,
                         "options": {"temperature": self.temperature}
                     },
-                    timeout=30
+                    timeout=self.request_timeout_seconds
                 )
                 if response.status_code == 200:
                     content = response.json()["response"]
-                    return self._parse_llm_response(content, provider_name, {"model": config["backup_model"]})
+                    return self._parse_llm_response(content, provider_name, {
+                        "model": config["backup_model"],
+                        "tokens_input": None,
+                        "tokens_output": None,
+                        "estimated_cost_usd": 0.0
+                    })
             raise e
     
     def _extract_azure_openai(self, config: Dict, prompt: str, provider_name: str) -> List[LLMKeyValuePair]:

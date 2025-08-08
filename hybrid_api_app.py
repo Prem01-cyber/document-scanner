@@ -6,9 +6,12 @@ import json
 import logging
 from typing import Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+import time
+from src.logging_utils import configure_json_logging
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,17 +42,32 @@ def create_hybrid_api() -> FastAPI:
     Create the hybrid document scanner FastAPI application
     """
     
+    # Structured logging
+    try:
+        configure_json_logging()
+    except Exception:
+        pass
+
     app = FastAPI(
         title="Hybrid Document Scanner API",
         version="4.0.0",
         description="Intelligent document processing with hybrid adaptive + LLM extraction"
     )
     
+    # Prometheus metrics
+    REQUEST_COUNTER = Counter("scanner_requests_total", "Total requests", ["endpoint"]) 
+    OCR_LATENCY = Histogram("scanner_ocr_seconds", "OCR latency in seconds")
+    EXTRACTION_LATENCY = Histogram("scanner_extraction_seconds", "Extraction latency in seconds", ["method"])
+    TOTAL_LATENCY = Histogram("scanner_total_seconds", "End-to-end request latency in seconds")
+
     # Initialize the hybrid processor
     processor = HybridDocumentProcessor(
         extraction_strategy=ExtractionStrategy.ADAPTIVE_FIRST,
         llm_provider=LLMProvider.OPENAI,
-        enable_learning=True
+        enable_learning=True,
+        # LLM robustness knobs
+        llm_request_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "40")),
+        llm_max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
     )
     
     @app.post("/scan-document")
@@ -66,6 +84,8 @@ def create_hybrid_api() -> FastAPI:
         Combines adaptive spatial analysis with LLM fallback for robust extraction
         """
         try:
+            req_start = time.time()
+            REQUEST_COUNTER.labels(endpoint="scan-document").inc()
             # Validate file
             if not file.content_type.startswith('image/'):
                 raise HTTPException(status_code=400, detail="File must be an image")
@@ -90,7 +110,12 @@ def create_hybrid_api() -> FastAPI:
                 )
             
             # Process document with hybrid system
+            ocr_t0 = time.time()
             result = processor.process_image_bytes(image_bytes, document_type)
+            ocr_dt = result.get("ocr_stats", {}).get("processing_time_seconds", 0.0)
+            extraction_dt = result.get("extraction_metadata", {}).get("extraction_time_seconds", 0.0)
+            OCR_LATENCY.observe(float(ocr_dt))
+            EXTRACTION_LATENCY.labels(method=result.get("extraction_metadata", {}).get("primary_method", "unknown")).observe(float(extraction_dt))
             
             # Ensure JSON serializable
             def ensure_serializable(obj):
@@ -107,6 +132,7 @@ def create_hybrid_api() -> FastAPI:
             
             serializable_result = ensure_serializable(result)
             
+            TOTAL_LATENCY.observe(time.time() - req_start)
             return JSONResponse(content=serializable_result)
             
         except HTTPException:
@@ -452,6 +478,11 @@ def create_hybrid_api() -> FastAPI:
                 },
                 status_code=503
             )
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint."""
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/")
     async def root():

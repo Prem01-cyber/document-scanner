@@ -179,6 +179,8 @@ class EnhancedDocumentProcessor:
         
         # Create annotated image
         annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
+        # OCR overlay using all Google OCR blocks from response
+        ocr_overlay_image = self._create_ocr_overlay(original_image, result.get("extracted_text_blocks", []), filtered_pairs)
         
         # Create quality overlay image if available
         quality_overlay_image = None
@@ -237,6 +239,7 @@ class EnhancedDocumentProcessor:
             "success": True,
             "image": annotated_image,
             "quality_overlay": quality_overlay_image or annotated_image,
+            "ocr_overlay": ocr_overlay_image,
             "table": table_data,
             "summary": summary,
             "quality_assessment": result.get("quality_assessment", {}),
@@ -377,6 +380,29 @@ class EnhancedDocumentProcessor:
                     cv2.line(img_array, key_center, value_center, color, 1)
         
         return Image.fromarray(img_array)
+
+    def _create_ocr_overlay(self, image, ocr_blocks, pairs):
+        """Draw OCR text blocks and highlight those used by key/value pairs."""
+        img = np.array(image).copy()
+        # Draw all OCR blocks
+        for block in ocr_blocks or []:
+            bb = block.get("bbox", {})
+            x, y, w, h = int(bb.get("x", 0)), int(bb.get("y", 0)), int(bb.get("width", 0)), int(bb.get("height", 0))
+            if w <= 0 or h <= 0:
+                continue
+            cv2.rectangle(img, (x, y), (x + w, y + h), (160, 160, 160), 1)
+
+        # Highlight extracted pair boxes
+        for idx, pair in enumerate(pairs, start=1):
+            for role, b in (("K", pair.get("key_bbox")), ("V", pair.get("value_bbox"))):
+                if not b:
+                    continue
+                x, y, w, h = b["x"], b["y"], b["width"], b["height"]
+                color = (0, 255, 0) if role == "K" else (0, 200, 255)
+                cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+                cv2.putText(img, f"{role}{idx}", (x, max(10, y-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+        return Image.fromarray(img)
     
     def get_system_status(self):
         """Get comprehensive system status"""
@@ -437,6 +463,7 @@ def create_enhanced_interface():
             return (
                 result["image"],
                 result.get("quality_overlay", result["image"]),  # Quality overlay image
+                result.get("ocr_overlay", result["image"]),      # OCR overlay image
                 result["table"], 
                 result["summary"],
                 quality_display,
@@ -446,6 +473,7 @@ def create_enhanced_interface():
             return (
                 None,
                 None,  # No quality overlay for errors
+                None,  # No OCR overlay for errors
                 [],
                 result["summary"],
                 "Quality assessment not available due to processing error.",
@@ -877,6 +905,11 @@ def create_enhanced_interface():
                             label="Quality Assessment Overlay",
                             interactive=False
                         )
+                    with gr.TabItem("🔤 OCR Blocks"):
+                        ocr_overlay_image = gr.Image(
+                            label="OCR Blocks Overlay",
+                            interactive=False
+                        )
                         
                         gr.Markdown("""
                         **Quality Overlay Legend:**  
@@ -887,6 +920,12 @@ def create_enhanced_interface():
                         **Gray Dashed Lines** = Safe margin guidelines
                         """)
                     
+                    with gr.TabItem("🔤 OCR Blocks"):
+                        ocr_overlay_image = gr.Image(
+                            label="OCR Blocks Overlay",
+                            interactive=False
+                        )
+
                     with gr.TabItem("📋 Extracted Data"):
                         result_table = gr.Dataframe(
                             headers=["#", "Key", "Value", "Confidence", "Source"],
@@ -954,8 +993,10 @@ def create_enhanced_interface():
         process_btn.click(
             fn=process_document_ui,
             inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
-            outputs=[result_image, quality_overlay_image, result_table, result_summary, quality_display, session_id_display]
+            outputs=[result_image, quality_overlay_image, ocr_overlay_image, result_table, result_summary, quality_display, session_id_display]
         )
+
+        # (Removed redundant click handler that returned gr.update())
         
         feedback_btn.click(
             fn=provide_quality_feedback,

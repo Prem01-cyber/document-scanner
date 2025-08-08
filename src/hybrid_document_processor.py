@@ -8,6 +8,8 @@ import logging
 import asyncio
 import time
 from fastapi import HTTPException
+from prometheus_client import Histogram
+from .logging_utils import configure_json_logging
 
 from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
 from .hybrid_kv_extractor import HybridKeyValueExtractor, ExtractionStrategy, HybridExtractionResult
@@ -29,12 +31,22 @@ class GoogleOCRProcessor:
             raise HTTPException(status_code=500, detail="Google Cloud Vision API not configured")
     
     def extract_text_with_bounds(self, image_bytes: bytes):
-        """Extract text with bounding boxes - returns both structured blocks and raw text"""
+        """Extract text with bounding boxes - returns both structured blocks and raw text
+        Applies basic preprocessing (deskew, denoise, adaptive threshold) before OCR.
+        """
         try:
             from google.cloud import vision
             from .adaptive_kv_extractor import TextBlock, BoundingBox
             
-            image = vision.Image(content=image_bytes)
+            # Preprocess image before OCR
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img_cv is None:
+                raise Exception("Invalid image data for OCR")
+
+            processed = self._preprocess_for_ocr(img_cv)
+            _, processed_buf = cv2.imencode('.png', processed)
+            image = vision.Image(content=processed_buf.tobytes())
             response = self.client.document_text_detection(image=image)
             
             if response.error.message:
@@ -86,6 +98,47 @@ class GoogleOCRProcessor:
             logger.error(f"OCR processing error: {e}")
             raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
 
+    def _preprocess_for_ocr(self, image_bgr: np.ndarray) -> np.ndarray:
+        """Apply deskew, denoise, and adaptive thresholding to improve OCR robustness."""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+        # Denoise (fast non-local means)
+        denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+
+        # Estimate skew via Hough transform on edges
+        edges = cv2.Canny(denoised, 50, 150, apertureSize=3)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
+        angle_deg = 0.0
+        if lines is not None and len(lines) > 0:
+            angles = []
+            for rho, theta in lines[:, 0]:
+                # Convert to degrees around horizontal (exclude verticals)
+                deg = (theta * 180.0 / np.pi) - 90.0
+                if -45 < deg < 45:
+                    angles.append(deg)
+            if angles:
+                angle_deg = float(np.median(angles))
+
+        # Deskew if needed
+        if abs(angle_deg) > 0.5:
+            h, w = denoised.shape
+            center = (w // 2, h // 2)
+            rot_mat = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+            denoised = cv2.warpAffine(denoised, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+        # Adaptive thresholding (Gaussian)
+        th = cv2.adaptiveThreshold(
+            denoised,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            15,
+        )
+
+        return th
+
 class HybridDocumentProcessor:
     """
     Document processor with hybrid extraction system
@@ -97,9 +150,15 @@ class HybridDocumentProcessor:
                  llm_provider: LLMProvider = LLMProvider.OPENAI,
                  adaptive_confidence_threshold: float = 0.5,
                  min_pairs_threshold: int = 2,
-                 enable_learning: bool = True):
+                 enable_learning: bool = True,
+                 llm_request_timeout_seconds: int = 40,
+                 llm_max_retries: int = 2):
         
         # Initialize components
+        try:
+            configure_json_logging()
+        except Exception:
+            pass
         self.quality_checker = AdaptiveDocumentQualityChecker()
         self.ocr_processor = GoogleOCRProcessor()
         
@@ -109,6 +168,8 @@ class HybridDocumentProcessor:
             adaptive_confidence_threshold=adaptive_confidence_threshold,
             min_pairs_threshold=min_pairs_threshold,
             llm_provider=llm_provider,
+            llm_request_timeout_seconds=llm_request_timeout_seconds,
+            llm_max_retries=llm_max_retries,
             enable_learning=enable_learning
         )
         
@@ -116,6 +177,9 @@ class HybridDocumentProcessor:
         self.processing_history = []
         self.total_processing_time = 0
         self.successful_extractions = 0
+
+        # Metrics
+        self._hist_total = Histogram("scanner_pipeline_seconds", "Total pipeline time in seconds")
         
     def process_image_bytes(self, image_bytes: bytes, document_type: str = "document") -> Dict:
         """Process image from bytes with hybrid extraction"""
@@ -171,7 +235,7 @@ class HybridDocumentProcessor:
             text_blocks, raw_text = self.ocr_processor.extract_text_with_bounds(image_bytes)
             ocr_time = time.time() - ocr_start
             
-            processing_audit.append(f"✅ OCR completed: {len(text_blocks)} blocks, {len(raw_text)} chars in {ocr_time:.3f}s")
+            processing_audit.append(f"✅ OCR completed: {len(text_blocks)} blocks, {len(raw_text)} chars in {ocr_time:.3f}s (preprocessed)")
             
             # Step 2.5: Enhanced quality assessment with text blocks for cut-off detection
             try:
@@ -233,6 +297,10 @@ class HybridDocumentProcessor:
         # Step 4: Process Results and Statistics
         total_processing_time = time.time() - start_time
         self.total_processing_time += total_processing_time
+        try:
+            self._hist_total.observe(total_processing_time)
+        except Exception:
+            pass
         
         # Update success tracking
         if hybrid_result.pairs:
@@ -268,6 +336,7 @@ class HybridDocumentProcessor:
                 "method_comparison": hybrid_result.method_comparison,
                 "strategy_used": self.kv_extractor.strategy.value
             },
+            "llm_usage": hybrid_result.llm_usage,
             "processing_statistics": extraction_stats,
             "processing_time_seconds": total_processing_time,
             "processing_audit": processing_audit,

@@ -178,6 +178,7 @@ class DocumentProcessor:
     def _create_success_response(self, result, processing_time, original_image):
         """Create a success response with annotated image and data"""
         all_pairs = result.get("key_value_pairs", [])
+        ocr_blocks = result.get("extracted_text_blocks", [])
         
         # Filter pairs based on confidence threshold
         confidence_threshold = self.processor.kv_extractor.adaptive_confidence_threshold
@@ -185,6 +186,7 @@ class DocumentProcessor:
         
         # Create annotated image with filtered pairs
         annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
+        ocr_overlay_image = self._create_ocr_overlay(original_image, ocr_blocks, filtered_pairs)
         
         # Create table data for filtered pairs
         table_data = []
@@ -244,6 +246,7 @@ class DocumentProcessor:
         return {
             "success": True,
             "image": annotated_image,
+            "ocr_overlay": ocr_overlay_image,
             "table": table_data,
             "summary": summary,
             "status": f"✅ Found {total_pairs} pairs, showing {shown_pairs} above {confidence_threshold:.1f} confidence"
@@ -324,6 +327,45 @@ class DocumentProcessor:
                     cv2.line(img_array, key_center, value_center, color, 1)
         
         return Image.fromarray(img_array)
+
+    def _create_ocr_overlay(self, image, ocr_blocks, pairs):
+        """Draw all OCR blocks lightly; highlight blocks used for extracted pairs."""
+        img = np.array(image).copy()
+
+        # Build a set of highlighted rectangles from pairs for quick lookup
+        def bbox_tuple(b):
+            return (b["x"], b["y"], b["width"], b["height"]) if b else None
+
+        highlighted = set()
+        for pair in pairs:
+            kb = bbox_tuple(pair.get("key_bbox"))
+            vb = bbox_tuple(pair.get("value_bbox"))
+            if kb:
+                highlighted.add(kb)
+            if vb:
+                highlighted.add(vb)
+
+        # Draw all OCR blocks in light gray
+        for block in ocr_blocks or []:
+            bb = block.get("bbox", {})
+            x, y, w, h = int(bb.get("x", 0)), int(bb.get("y", 0)), int(bb.get("width", 0)), int(bb.get("height", 0))
+            if w <= 0 or h <= 0:
+                continue
+            color = (180, 180, 180)
+            thickness = 1
+            cv2.rectangle(img, (x, y), (x + w, y + h), color, thickness)
+
+        # Overlay highlighted blocks for extracted pairs
+        for idx, pair in enumerate(pairs, start=1):
+            for role, b in (("K", pair.get("key_bbox")), ("V", pair.get("value_bbox"))):
+                if not b:
+                    continue
+                x, y, w, h = b["x"], b["y"], b["width"], b["height"]
+                color = (0, 255, 0) if role == "K" else (0, 200, 255)
+                cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+                cv2.putText(img, f"{role}{idx}", (x, max(10, y-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+        return Image.fromarray(img)
     
     def _get_method_breakdown(self, pairs):
         """Get breakdown of extraction methods used"""
@@ -398,11 +440,13 @@ def create_modern_interface():
         if result["success"]:
             return (
                 result["image"],
+                result.get("ocr_overlay"),
                 result["table"], 
                 result["summary"]
             )
         else:
             return (
+                None,
                 None,
                 [],
                 result["summary"]
@@ -566,6 +610,12 @@ def create_modern_interface():
                         **Legend:** 🟢 High Confidence (>0.8) | 🟡 Medium (>0.6) | 🟠 Low (>0.4) | 🔴 Very Low  
                         **K#** = Key, **V#** = Value, Lines show connections, Numbers show confidence scores
                         """)
+
+                    with gr.TabItem("🔤 OCR Blocks"):
+                        ocr_overlay_image = gr.Image(
+                            label="OCR Blocks Overlay",
+                            interactive=False
+                        )
                     
                     with gr.TabItem("📋 Extracted Data"):
                         result_table = gr.Dataframe(
@@ -629,7 +679,7 @@ def create_modern_interface():
         process_btn.click(
             fn=process_document_ui,
             inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
-            outputs=[result_image, result_table, result_summary]
+            outputs=[result_image, ocr_overlay_image, result_table, result_summary]
         )
         
         status_btn.click(

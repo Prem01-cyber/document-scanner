@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from prometheus_client import Histogram
 from .logging_utils import configure_json_logging
 import base64
+from skimage.filters import threshold_sauvola
 
 from quality.adaptive_quality_checker import AdaptiveDocumentQualityChecker
 from .hybrid_kv_extractor import HybridKeyValueExtractor, ExtractionStrategy, HybridExtractionResult
@@ -103,45 +104,183 @@ class GoogleOCRProcessor:
             raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
 
     def _preprocess_for_ocr(self, image_bgr: np.ndarray) -> np.ndarray:
-        """Apply deskew, denoise, and adaptive thresholding to improve OCR robustness."""
-        # Convert to grayscale
+        """Apply perspective correction, denoise, illumination normalization, deskew, advanced binarization,
+        morphology cleanup, and line removal to improve OCR robustness.
+        Returns a single-channel 8-bit preprocessed image.
+        """
+        # 1) Grayscale
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
-        # Denoise (fast non-local means)
-        denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+        # 2) (Optional) Perspective correction by detecting document contour
+        corrected = self._perspective_correction(gray)
 
-        # Estimate skew via Hough transform on edges
-        edges = cv2.Canny(denoised, 50, 150, apertureSize=3)
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
+        # 3) If very small, upscale slightly for better readability
+        corrected = self._maybe_super_res(corrected)
+
+        # 4) Denoise (fast non-local means) and illumination normalization
+        denoised = cv2.fastNlMeansDenoising(corrected, h=10, templateWindowSize=7, searchWindowSize=21)
+        norm = self._illumination_normalize(denoised)
+
+        # 5) Light sharpening (unsharp mask)
+        sharp = self._unsharp_mask(norm, amount=1.0, threshold=3)
+
+        # 6) Estimate skew and deskew
+        deskewed = self._deskew_by_hough(sharp)
+
+        # 7) Advanced binarization: compare Otsu, Sauvola, and adaptive Gaussian; choose best by edge metric
+        binary = self._advanced_binarization(deskewed)
+
+        # 8) Morphological cleanup
+        cleaned = self._morphology_cleanup(binary)
+
+        # 9) Line removal (table lines) to avoid interfering with OCR
+        no_lines = self._remove_lines(cleaned)
+
+        return no_lines
+
+    def _perspective_correction(self, gray: np.ndarray) -> np.ndarray:
+        img = gray
+        try:
+            small = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5) if max(gray.shape) > 1400 else gray
+            edges = cv2.Canny(small, 50, 150)
+            contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            h_s, w_s = small.shape[:2]
+            best = None
+            best_area = 0
+            for cnt in contours:
+                peri = cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+                if len(approx) == 4:
+                    area = cv2.contourArea(approx)
+                    if area > best_area:
+                        best_area = area
+                        best = approx
+            if best is not None and best_area > 0.2 * (w_s * h_s):
+                # order points and warp
+                pts = best.reshape(4, 2).astype(np.float32)
+                # scale back if resized
+                if small is not gray:
+                    scale_x = gray.shape[1] / w_s
+                    scale_y = gray.shape[0] / h_s
+                    pts[:, 0] *= scale_x
+                    pts[:, 1] *= scale_y
+                warped = self._four_point_transform(gray, pts)
+                return warped
+        except Exception:
+            pass
+        return img
+
+    def _four_point_transform(self, img: np.ndarray, pts: np.ndarray) -> np.ndarray:
+        # order points: top-left, top-right, bottom-right, bottom-left
+        rect = np.zeros((4, 2), dtype="float32")
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+        (tl, tr, br, bl) = rect
+        widthA = np.linalg.norm(br - bl)
+        widthB = np.linalg.norm(tr - tl)
+        maxWidth = int(max(widthA, widthB))
+        heightA = np.linalg.norm(tr - br)
+        heightB = np.linalg.norm(tl - bl)
+        maxHeight = int(max(heightA, heightB))
+        dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype="float32")
+        M = cv2.getPerspectiveTransform(rect, dst)
+        warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return warped
+
+    def _illumination_normalize(self, gray: np.ndarray) -> np.ndarray:
+        # CLAHE
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl = clahe.apply(gray)
+        # Background estimation by large Gaussian blur and division
+        bg = cv2.GaussianBlur(cl, (0, 0), sigmaX=21, sigmaY=21)
+        norm = cv2.divide(cl, bg, scale=128)
+        return norm
+
+    def _unsharp_mask(self, img: np.ndarray, amount: float = 1.0, threshold: int = 3) -> np.ndarray:
+        blurred = cv2.GaussianBlur(img, (0, 0), sigmaX=1.0)
+        sharp = cv2.addWeighted(img, 1 + amount, blurred, -amount, 0)
+        if threshold > 0:
+            low_contrast_mask = (cv2.absdiff(img, blurred) < threshold).astype(np.uint8) * 255
+            sharp = np.where(low_contrast_mask == 255, img, sharp).astype(np.uint8)
+        return sharp
+
+    def _deskew_by_hough(self, gray: np.ndarray) -> np.ndarray:
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=180)
         angle_deg = 0.0
         if lines is not None and len(lines) > 0:
             angles = []
             for rho, theta in lines[:, 0]:
-                # Convert to degrees around horizontal (exclude verticals)
                 deg = (theta * 180.0 / np.pi) - 90.0
                 if -45 < deg < 45:
                     angles.append(deg)
             if angles:
                 angle_deg = float(np.median(angles))
-
-        # Deskew if needed
-        if abs(angle_deg) > 0.5:
-            h, w = denoised.shape
+        if abs(angle_deg) > 0.3:
+            h, w = gray.shape
             center = (w // 2, h // 2)
             rot_mat = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
-            denoised = cv2.warpAffine(denoised, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            return cv2.warpAffine(gray, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return gray
 
-        # Adaptive thresholding (Gaussian)
-        th = cv2.adaptiveThreshold(
-            denoised,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            31,
-            15,
-        )
+    def _advanced_binarization(self, gray: np.ndarray) -> np.ndarray:
+        # Otsu
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Sauvola
+        try:
+            win = 31 if min(gray.shape) > 300 else 15
+            sau_t = threshold_sauvola(gray, window_size=win)
+            sau = (gray > sau_t).astype(np.uint8) * 255
+        except Exception:
+            sau = otsu
+        # Adaptive Gaussian
+        ada = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
 
-        return th
+        # Choose best by edge density heuristic
+        def edge_score(img_bin: np.ndarray) -> float:
+            e = cv2.Canny(img_bin, 50, 150)
+            ratio = np.mean(img_bin == 255)
+            # prefer reasonable white ratio and many edges
+            return float(e.sum()) / 255.0 - abs(ratio - 0.6) * 1e5
+
+        candidates = [(otsu, edge_score(otsu)), (sau, edge_score(sau)), (ada, edge_score(ada))]
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][0]
+
+    def _morphology_cleanup(self, img_bin: np.ndarray) -> np.ndarray:
+        # Remove tiny noise and close small gaps
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        opened = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, kernel_open, iterations=1)
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+        return closed
+
+    def _remove_lines(self, img_bin: np.ndarray) -> np.ndarray:
+        try:
+            inv = 255 - img_bin
+            # Horizontal lines
+            hori_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
+            detect_h = cv2.morphologyEx(inv, cv2.MORPH_OPEN, hori_kernel, iterations=1)
+            # Vertical lines
+            vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+            detect_v = cv2.morphologyEx(inv, cv2.MORPH_OPEN, vert_kernel, iterations=1)
+            lines = cv2.bitwise_or(detect_h, detect_v)
+            # Subtract lines from inverted, then invert back
+            cleaned_inv = cv2.subtract(inv, lines)
+            cleaned = 255 - cleaned_inv
+            return cleaned
+        except Exception:
+            return img_bin
+
+    def _maybe_super_res(self, gray: np.ndarray) -> np.ndarray:
+        h, w = gray.shape[:2]
+        if min(h, w) < 700:
+            return cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+        return gray
 
 class HybridDocumentProcessor:
     """

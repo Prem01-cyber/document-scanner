@@ -33,8 +33,8 @@ class GoogleOCRProcessor:
             raise HTTPException(status_code=500, detail="Google Cloud Vision API not configured")
     
     def extract_text_with_bounds(self, image_bytes: bytes, preprocess_options: dict | None = None):
-        """Extract text with bounding boxes - returns structured blocks, raw text, and preprocessed image bytes
-        Applies basic preprocessing (deskew, denoise, adaptive threshold) before OCR.
+        """Extract text with bounding boxes returned in PREPROCESSED image coordinates.
+        Returns (blocks, words, raw_text, preprocessed_png_bytes).
         """
         try:
             from google.cloud import vision
@@ -58,9 +58,10 @@ class GoogleOCRProcessor:
                 raise Exception(f"OCR Error: {response.error.message}")
             
             text_blocks = []
+            word_items = []
             raw_text_parts = []
             
-            # Process structured blocks for adaptive extraction
+            # Process structured blocks for adaptive extraction (coords in processed space)
             for page in response.full_text_annotation.pages:
                 for block in page.blocks:
                     block_text = ""
@@ -69,29 +70,34 @@ class GoogleOCRProcessor:
                         for word in paragraph.words:
                             word_text = "".join([symbol.text for symbol in word.symbols])
                             block_text += word_text + " "
+                            # Word-level bbox in processed space
+                            w_vertices = word.bounding_box.vertices
+                            wxs = np.array([v.x for v in w_vertices], dtype=np.float32)
+                            wys = np.array([v.y for v in w_vertices], dtype=np.float32)
+                            h_p, w_p = processed.shape[:2]
+                            wx_min = int(np.clip(wxs.min(), 0, w_p - 1))
+                            wy_min = int(np.clip(wys.min(), 0, h_p - 1))
+                            wx_max = int(np.clip(wxs.max(), 0, w_p - 1))
+                            wy_max = int(np.clip(wys.max(), 0, h_p - 1))
+                            word_items.append({
+                                "text": word_text.strip(),
+                                "bbox": {
+                                    "x": int(wx_min),
+                                    "y": int(wy_min),
+                                    "width": int(max(1, wx_max - wx_min)),
+                                    "height": int(max(1, wy_max - wy_min))
+                                }
+                            })
                     
-                    # Get bounding box in processed space and map back to source using inverse transform
+                    # Bounding box is already in processed image space
                     vertices = block.bounding_box.vertices
-                    pts_proc = np.array([[v.x, v.y, 1.0] for v in vertices], dtype=np.float32).T  # 3xN
-                    H_inv = None
-                    try:
-                        H_inv = np.linalg.inv(H_src_to_proc)
-                    except Exception:
-                        H_inv = None
-
-                    if H_inv is not None:
-                        pts_src_h = H_inv @ pts_proc
-                        pts_src_h /= np.maximum(pts_src_h[2, :], 1e-6)
-                        xs = pts_src_h[0, :]
-                        ys = pts_src_h[1, :]
-                    else:
-                        xs = np.array([v.x for v in vertices], dtype=np.float32)
-                        ys = np.array([v.y for v in vertices], dtype=np.float32)
-
-                    x_min = int(np.clip(xs.min(), 0, img_cv.shape[1] - 1))
-                    y_min = int(np.clip(ys.min(), 0, img_cv.shape[0] - 1))
-                    x_max = int(np.clip(xs.max(), 0, img_cv.shape[1] - 1))
-                    y_max = int(np.clip(ys.max(), 0, img_cv.shape[0] - 1))
+                    xs = np.array([v.x for v in vertices], dtype=np.float32)
+                    ys = np.array([v.y for v in vertices], dtype=np.float32)
+                    h_p, w_p = processed.shape[:2]
+                    x_min = int(np.clip(xs.min(), 0, w_p - 1))
+                    y_min = int(np.clip(ys.min(), 0, h_p - 1))
+                    x_max = int(np.clip(xs.max(), 0, w_p - 1))
+                    y_max = int(np.clip(ys.max(), 0, h_p - 1))
 
                     bbox = BoundingBox(
                         x=x_min,
@@ -115,7 +121,7 @@ class GoogleOCRProcessor:
             if not raw_text:
                 raw_text = "\n".join(raw_text_parts)
             
-            return text_blocks, raw_text, processed_png_bytes
+            return text_blocks, word_items, raw_text, processed_png_bytes
             
         except Exception as e:
             logger.error(f"OCR processing error: {e}")
@@ -430,13 +436,16 @@ class HybridDocumentProcessor:
                 if not ok:
                     raise Exception("Failed to encode ROI for OCR")
                 roi_bytes = buf.tobytes()
-                text_blocks, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(roi_bytes, preprocess_options or {})
+                text_blocks, word_items, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(roi_bytes, preprocess_options or {})
                 # Offset OCR bbox by ROI origin
                 for tb in text_blocks:
                     tb.bbox.x += roi_info["x"]
                     tb.bbox.y += roi_info["y"]
+                for wi in word_items:
+                    wi["bbox"]["x"] += roi_info["x"]
+                    wi["bbox"]["y"] += roi_info["y"]
             else:
-                text_blocks, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(image_bytes, preprocess_options or {})
+                text_blocks, word_items, raw_text, preproc_png = self.ocr_processor.extract_text_with_bounds(image_bytes, preprocess_options or {})
             ocr_time = time.time() - ocr_start
             
             processing_audit.append(f"✅ OCR completed: {len(text_blocks)} blocks, {len(raw_text)} chars in {ocr_time:.3f}s (preprocessed)")
@@ -523,7 +532,7 @@ class HybridDocumentProcessor:
         processing_audit.append(f"📊 Final: {len(hybrid_result.pairs)} pairs extracted via {hybrid_result.primary_method}")
         
         # Merge mode: append new pairs to previous
-        formatted_pairs = self._format_extraction_results(hybrid_result.pairs, text_blocks)
+        formatted_pairs = self._format_extraction_results(hybrid_result.pairs, text_blocks, word_items)
         if append_mode and previous_pairs:
             existing = {(p.get("key",""), p.get("value","")) for p in previous_pairs}
             for fp in formatted_pairs:
@@ -577,30 +586,43 @@ class HybridDocumentProcessor:
                 }
                 for block in text_blocks
             ],
+            "extracted_words": word_items,
             "raw_text_extracted": raw_text[:1000] + "..." if len(raw_text) > 1000 else raw_text  # Truncate for response size
         }
     
-    def _format_extraction_results(self, pairs: List[Union[KeyValuePair, LLMKeyValuePair]], text_blocks=None) -> List[Dict]:
+    def _format_extraction_results(self, pairs: List[Union[KeyValuePair, LLMKeyValuePair]], text_blocks=None, word_items=None) -> List[Dict]:
         """Format extraction results for API response, assigning approximate
         bounding boxes for LLM-only pairs by aligning to OCR text blocks when available."""
         formatted_pairs = []
         text_blocks = text_blocks or []
+        word_items = word_items or []
 
         # Lightweight matcher to map a string to the best OCR block
-        def _best_block_for_text(query: str):
+        def _normalize(s: str) -> str:
+            return ''.join(ch.lower() for ch in str(s) if ch.isalnum() or ch.isspace()).strip()
+
+        def _digits_only(s: str) -> str:
+            return ''.join(ch for ch in str(s) if ch.isdigit())
+
+        def _block_center(blk):
+            return (blk.bbox.x + blk.bbox.width/2.0, blk.bbox.y + blk.bbox.height/2.0)
+
+        def _best_block_for_text(query: str, near_block=None, image_wh=None, prefer_below_or_right=False):
             if not query or not text_blocks:
                 return None
-            q = str(query).strip().lower()
-            q_tokens = {t for t in q.replace("*", "").split() if t}
+            q = _normalize(query)
+            q_tokens = {t for t in q.replace('*', '').split() if t}
+            q_digits = _digits_only(query)
             best = None
             best_score = 0.0
             for blk in text_blocks:
                 try:
-                    blk_text = str(blk.text).strip().lower()
+                    blk_text_raw = str(blk.text)
+                    blk_text = _normalize(blk_text_raw)
                     blk_tokens = {t for t in blk_text.split() if t}
                     score = 0.0
-                    # direct substring bonus
-                    if q in blk_text or blk_text in q:
+                    # direct substring/containment
+                    if q and (q in blk_text or blk_text in q):
                         score = max(len(q), len(blk_text)) / (len(q) + len(blk_text) + 1e-6)
                     # token overlap score
                     if q_tokens and blk_tokens:
@@ -608,17 +630,99 @@ class HybridDocumentProcessor:
                         union = len(q_tokens | blk_tokens)
                         score = max(score, inter / max(union, 1))
                     # numeric exact match boost
-                    if q.isdigit() and q == ''.join([c for c in blk_text if c.isdigit()]):
-                        score = 1.0
+                    blk_digits = _digits_only(blk_text_raw)
+                    if q_digits and q_digits == blk_digits:
+                        score = max(score, 1.0)
+                    # partial digit match for dates, IDs, etc.
+                    elif q_digits and blk_digits and len(q_digits) >= 3 and len(blk_digits) >= 3:
+                        common_digits = sum(1 for a, b in zip(q_digits, blk_digits) if a == b)
+                        if common_digits >= min(3, len(q_digits) // 2):
+                            score = max(score, 0.6)
+                    # fuzzy matching for names and similar text
+                    if len(q) >= 3 and len(blk_text) >= 3:
+                        # Simple character similarity
+                        common_chars = sum(1 for c in q if c in blk_text)
+                        if common_chars >= min(3, len(q) // 2):
+                            char_score = common_chars / max(len(q), len(blk_text))
+                            score = max(score, char_score * 0.4)
+                    # proximity bonus if a reference block is provided
+                    if near_block is not None and image_wh is not None:
+                        cx_ref, cy_ref = _block_center(near_block)
+                        cx, cy = _block_center(blk)
+                        w, h = image_wh
+                        # normalized distance in [0, sqrt(2)]
+                        dist = ((cx - cx_ref)**2 + (cy - cy_ref)**2) ** 0.5 / max((w**2 + h**2) ** 0.5, 1)
+                        prox = 1.0 - min(max(dist, 0.0), 1.0)
+                        score += 0.35 * prox
+                        # prefer blocks to the right or just below the key label
+                        if prefer_below_or_right and (cx >= cx_ref - 5 or cy >= cy_ref - 5):
+                            score += 0.05
                 except Exception:
                     continue
                 if score > best_score:
                     best_score = score
                     best = blk
             # require a minimal score to avoid random boxes
-            if best is not None and best_score >= 0.35:
+            # Lowered threshold from 0.38 to 0.20 to be more permissive for LLM-extracted text
+            if best is not None and best_score >= 0.20:
+                logger.debug(f"Text mapping: '{query}' -> '{best.text}' (score: {best_score:.3f})")
                 return best
+            if best is not None:
+                logger.debug(f"Text mapping rejected: '{query}' -> '{best.text}' (score: {best_score:.3f} < 0.20)")
+            else:
+                logger.debug(f"Text mapping failed: '{query}' -> no suitable block found")
             return None
+
+        # Try to refine a coarse block using word spans that best cover the query
+        def _refine_bbox_with_words(query: str, coarse_block):
+            if not query or not word_items:
+                return coarse_block
+            q = _normalize(query)
+            if not q:
+                return coarse_block
+            words_in_block = []
+            bx0 = coarse_block.bbox.x
+            by0 = coarse_block.bbox.y
+            bx1 = bx0 + coarse_block.bbox.width
+            by1 = by0 + coarse_block.bbox.height
+            for wi in word_items:
+                wb = wi["bbox"]
+                wx0, wy0 = wb["x"], wb["y"]
+                wx1, wy1 = wx0 + wb["width"], wy0 + wb["height"]
+                if wx0 >= bx0 and wy0 >= by0 and wx1 <= bx1 and wy1 <= by1:
+                    words_in_block.append((wi["text"], wb))
+            if not words_in_block:
+                return coarse_block
+            # greedy cover by words
+            selected = []
+            rem = q.split()
+            for t, wb in words_in_block:
+                nt = _normalize(t)
+                if not nt:
+                    continue
+                hit = False
+                for tok in list(rem):
+                    if tok and (tok in nt or nt in tok):
+                        rem.remove(tok)
+                        hit = True
+                if hit:
+                    selected.append(wb)
+                if not rem:
+                    break
+            if not selected:
+                return coarse_block
+            # build tight bbox
+            xs0 = min(wb["x"] for wb in selected)
+            ys0 = min(wb["y"] for wb in selected)
+            xs1 = max(wb["x"] + wb["width"] for wb in selected)
+            ys1 = max(wb["y"] + wb["height"] for wb in selected)
+            class _BBox:
+                def __init__(self, x, y, w, h):
+                    self.x=x; self.y=y; self.width=w; self.height=h
+            class _Blk:
+                def __init__(self, bbox):
+                    self.bbox=bbox
+            return _Blk(_BBox(xs0, ys0, xs1 - xs0, ys1 - ys0))
         
         for pair in pairs:
             # Handle both adaptive and LLM pairs
@@ -645,8 +749,24 @@ class HybridDocumentProcessor:
                 }
             else:
                 # LLM KeyValuePair without bounding boxes
+                # First anchor the key by text similarity
                 key_blk = _best_block_for_text(getattr(pair, 'key', ''))
-                val_blk = _best_block_for_text(getattr(pair, 'value', ''))
+                # Then search for the value with both text match and proximity to the key (if found)
+                img_wh = None
+                try:
+                    # infer overall image width/height from available blocks
+                    if text_blocks:
+                        max_right = max(tb.bbox.x + tb.bbox.width for tb in text_blocks)
+                        max_bottom = max(tb.bbox.y + tb.bbox.height for tb in text_blocks)
+                        img_wh = (max_right, max_bottom)
+                except Exception:
+                    img_wh = None
+                val_blk = _best_block_for_text(getattr(pair, 'value', ''), near_block=key_blk, image_wh=img_wh, prefer_below_or_right=True)
+                # tighten boxes with word spans when possible
+                if key_blk is not None:
+                    key_blk = _refine_bbox_with_words(getattr(pair, 'key', ''), key_blk)
+                if val_blk is not None:
+                    val_blk = _refine_bbox_with_words(getattr(pair, 'value', ''), val_blk)
                 def _bbox_dict(blk):
                     return {
                         "x": blk.bbox.x,

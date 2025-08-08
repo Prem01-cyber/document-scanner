@@ -202,11 +202,16 @@ TASK: Extract ALL key-value pairs from the text below. Focus on:
 
         RULES:
         1. Return ONLY valid JSON object with flat key/value pairs, no arrays, no nested objects: {{"key": "value", "key2": "value2"}}
-2. Use clear, descriptive keys (e.g., "Full Name" not just "Name")
+2. Use SPECIFIC, descriptive keys - avoid generic terms like "Unknown Field":
+   - Names: "Full Name", "First Name", "Last Name"
+   - IDs: "ID Number", "Document ID", "Reference Number"  
+   - Dates: "Date of Birth", "Issue Date", "Expiry Date", "Date 1", "Date 2"
+   - Address: "Address", "Street Address", "City", "State"
+   - Numbers: "Phone Number", "Account Number", specific purpose if known
 3. Preserve original values exactly as written
 4. Skip empty, unclear, or duplicate information
 5. For dates, keep original format
-6. If uncertain about a pairing, include it with a clear key
+6. When you see a clear value but unclear purpose, use descriptive keys like "Document Number", "Reference Code", etc.
         7. Do not include any trailing commentary. Output must be a single JSON object only.
 
 DOCUMENT TYPE: {document_type}

@@ -216,24 +216,37 @@ class DocumentProcessor:
         base_image_for_annotation = pre_image if pre_image is not None else original_image
         annotated_image = self._create_enhanced_annotation(base_image_for_annotation, filtered_pairs, confidence_threshold)
         
-        # Create table data for filtered pairs
+        # Create enhanced table data with visual analysis
         table_data = []
+        region_images = []
+        
         for i, pair in enumerate(filtered_pairs, 1):
             confidence = pair.get("confidence", 0)
-            confidence_str = f"{confidence:.2f}"
-            if confidence > 0.8:
-                confidence_str += " 🟢"
-            elif confidence > 0.5:
-                confidence_str += " 🟡"
-            else:
-                confidence_str += " 🔴"
+            source = pair.get("source", "unknown")
+            confidence_str = f"{confidence:.2f} {self._get_confidence_emoji(confidence)}"
             
+            # Extract region images if bounding boxes exist
+            key_bbox = pair.get("key_bbox")
+            value_bbox = pair.get("value_bbox")
+            
+            # Get OCR text from regions for comparison
+            key_ocr_text = ""
+            value_ocr_text = ""
+            
+            if key_bbox and base_image_for_annotation:
+                key_ocr_text = self._extract_text_from_bbox(base_image_for_annotation, key_bbox, ocr_blocks)
+            if value_bbox and base_image_for_annotation:
+                value_ocr_text = self._extract_text_from_bbox(base_image_for_annotation, value_bbox, ocr_blocks)
+            
+            # Create detailed row
             table_data.append([
                 i,
-                pair.get("key", "")[:30],
-                pair.get("value", "")[:40], 
+                pair.get("key", "")[:25],
+                pair.get("value", "")[:30], 
                 confidence_str,
-                pair.get("source", "unknown")
+                source.upper(),
+                key_ocr_text[:20] if key_ocr_text else "N/A",
+                value_ocr_text[:25] if value_ocr_text else "N/A"
             ])
         
         # Get LLM provider info if available
@@ -290,6 +303,34 @@ class DocumentProcessor:
             "status": f"❌ {message}"
         }
     
+    def _get_source_color(self, source, confidence):
+        """Get color based on source and confidence with high contrast"""
+        # High contrast colors for better visibility
+        base_colors = {
+            "llm": (255, 50, 0),        # Bright Orange-Red for LLM
+            "adaptive": (0, 255, 100),  # Bright Green for Adaptive  
+            "unknown": (128, 128, 128)  # Gray for unknown
+        }
+        
+        base_color = base_colors.get(source.lower(), base_colors["unknown"])
+        
+        # Ensure minimum brightness for visibility
+        intensity = max(0.7, min(1.0, confidence + 0.3))  # Range 0.7-1.0 for better visibility
+        color = tuple(int(c * intensity) for c in base_color)
+        
+        return color
+    
+    def _get_confidence_emoji(self, confidence):
+        """Get emoji based on confidence level"""
+        if confidence > 0.8:
+            return "🟢"
+        elif confidence > 0.6:
+            return "🟡"
+        elif confidence > 0.4:
+            return "🟠"
+        else:
+            return "🔴"
+    
     def _create_enhanced_annotation(self, image, pairs, confidence_threshold):
         """Create a clean, elegant annotation of the image with confidence-based filtering"""
         if not pairs:
@@ -310,48 +351,292 @@ class DocumentProcessor:
         # Convert to OpenCV format
         img_array = np.array(image)
         
-        # Clean color scheme based on confidence
-        def get_confidence_color(confidence):
-            if confidence > 0.8:
-                return (0, 255, 0)      # Green for high confidence
-            elif confidence > 0.6:
-                return (0, 200, 255)    # Orange for medium-high confidence  
-            elif confidence > 0.4:
-                return (0, 150, 255)    # Light red for medium confidence
-            else:
-                return (0, 100, 255)    # Red for low confidence
+
         
-        # Draw clean bounding boxes
+        # Draw all pairs with different visual styles based on source and spatial availability
         display_index = 1
+        pairs_without_bbox = []
+        
         for pair in pairs:
             key_bbox = pair.get("key_bbox")
             value_bbox = pair.get("value_bbox")
-            # Skip pairs without any spatial info (e.g., pure LLM results)
-            if not key_bbox and not value_bbox:
-                continue
-
             confidence = pair.get("confidence", 0)
-            color = get_confidence_color(confidence)
-            thickness = 2 if confidence > 0.7 else 1
-
-            if key_bbox:
-                x, y, w, h = key_bbox["x"], key_bbox["y"], key_bbox["width"], key_bbox["height"]
-                cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
-                cv2.putText(img_array, f"K{display_index}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
-            if value_bbox:
-                x, y, w, h = value_bbox["x"], value_bbox["y"], value_bbox["width"], value_bbox["height"]
-                cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness)
-                cv2.putText(img_array, f"V{display_index}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
+            source = pair.get("source", "unknown")
+            color = self._get_source_color(source, confidence)
+            
+            # If this pair has spatial info, draw bounding boxes
+            if key_bbox or value_bbox:
+                # Different visual styles based on source
+                if source == "llm":
+                    # LLM pairs: dashed borders and different label style
+                    thickness = 2 if confidence > 0.7 else 1
+                    label_prefix = "L"  # L for LLM
+                else:
+                    # Adaptive pairs: solid borders
+                    thickness = 2 if confidence > 0.7 else 1
+                    label_prefix = "A"  # A for Adaptive
+                
                 if key_bbox:
-                    key_center = (key_bbox["x"] + key_bbox["width"]//2, key_bbox["y"] + key_bbox["height"]//2)
-                    value_center = (x + w//2, y + h//2)
-                    cv2.line(img_array, key_center, value_center, color, 1)
+                    x, y, w, h = key_bbox["x"], key_bbox["y"], key_bbox["width"], key_bbox["height"]
+                    if source.lower() == "llm":
+                        # Draw thick dashed rectangle for LLM pairs
+                        self._draw_dashed_rectangle(img_array, (x, y), (x + w, y + h), color, thickness + 1)
+                    else:
+                        cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness + 1)
+                    
+                    # Enhanced label with background for better visibility
+                    label_text = f"{label_prefix}K{display_index}"
+                    self._draw_label_with_background(img_array, label_text, (x, y-5), color)
 
-            display_index += 1
+                if value_bbox:
+                    x, y, w, h = value_bbox["x"], value_bbox["y"], value_bbox["width"], value_bbox["height"]
+                    if source.lower() == "llm":
+                        # Draw thick dashed rectangle for LLM pairs
+                        self._draw_dashed_rectangle(img_array, (x, y), (x + w, y + h), color, thickness + 1)
+                    else:
+                        cv2.rectangle(img_array, (x, y), (x + w, y + h), color, thickness + 1)
+                    
+                    # Enhanced label with background for better visibility
+                    label_text = f"{label_prefix}V{display_index}"
+                    self._draw_label_with_background(img_array, label_text, (x, y-5), color)
+
+                    if key_bbox:
+                        key_center = (key_bbox["x"] + key_bbox["width"]//2, key_bbox["y"] + key_bbox["height"]//2)
+                        value_center = (x + w//2, y + h//2)
+                        if source == "llm":
+                            # Draw dashed line for LLM pairs
+                            self._draw_dashed_line(img_array, key_center, value_center, color)
+                        else:
+                            cv2.line(img_array, key_center, value_center, color, 1)
+
+                display_index += 1
+            else:
+                # Track pairs without spatial coordinates (regardless of source)
+                pairs_without_bbox.append((display_index, pair))
+                display_index += 1
+        
+        # Draw overlay for pairs without spatial coordinates
+        if pairs_without_bbox:
+            self._draw_overlay_panel(img_array, pairs_without_bbox)
+        
+        # Add comprehensive status display
+        self._draw_status_overlay(img_array, pairs, pairs_without_bbox, display_index - 1)
         
         return Image.fromarray(img_array)
+
+    def _draw_dashed_rectangle(self, img_array, pt1, pt2, color, thickness):
+        """Draw a dashed rectangle"""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        
+        # Draw dashed lines for each side
+        self._draw_dashed_line(img_array, (x1, y1), (x2, y1), color, thickness)  # top
+        self._draw_dashed_line(img_array, (x2, y1), (x2, y2), color, thickness)  # right
+        self._draw_dashed_line(img_array, (x2, y2), (x1, y2), color, thickness)  # bottom
+        self._draw_dashed_line(img_array, (x1, y2), (x1, y1), color, thickness)  # left
+
+    def _draw_dashed_line(self, img_array, pt1, pt2, color, thickness=1):
+        """Draw a dashed line between two points"""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        
+        # Calculate line length and direction
+        dx = x2 - x1
+        dy = y2 - y1
+        length = int(np.sqrt(dx*dx + dy*dy))
+        
+        if length == 0:
+            return
+        
+        # Normalize direction
+        dx_norm = dx / length
+        dy_norm = dy / length
+        
+        # Draw dashed line with 8px dash, 4px gap pattern
+        dash_length = 8
+        gap_length = 4
+        pattern_length = dash_length + gap_length
+        
+        for i in range(0, length, pattern_length):
+            start_x = int(x1 + i * dx_norm)
+            start_y = int(y1 + i * dy_norm)
+            end_x = int(x1 + min(i + dash_length, length) * dx_norm)
+            end_y = int(y1 + min(i + dash_length, length) * dy_norm)
+            
+            cv2.line(img_array, (start_x, start_y), (end_x, end_y), color, thickness)
+
+    def _draw_label_with_background(self, img_array, text, position, color):
+        """Draw text label with background for better visibility"""
+        x, y = position
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        thickness = 2
+        
+        # Get text size
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        
+        # Draw background rectangle
+        bg_x1 = x - 2
+        bg_y1 = y - text_height - 5
+        bg_x2 = x + text_width + 4
+        bg_y2 = y + 5
+        
+        cv2.rectangle(img_array, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)  # Black background
+        cv2.rectangle(img_array, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 2)  # Colored border
+        
+        # Draw text
+        cv2.putText(img_array, text, (x, y), font, font_scale, (255, 255, 255), thickness)
+
+    def _draw_status_overlay(self, img_array, all_pairs, pairs_without_bbox, spatial_pairs_count):
+        """Draw status overlay showing extraction statistics"""
+        height, width = img_array.shape[:2]
+        
+        # Create status box in top-left corner
+        status_width = 300
+        status_height = 100
+        
+        # Semi-transparent background
+        overlay = img_array.copy()
+        cv2.rectangle(overlay, (10, 10), (status_width, status_height), (0, 0, 0), -1)
+        cv2.addWeighted(img_array, 0.7, overlay, 0.3, 0, img_array)
+        
+        # Border
+        cv2.rectangle(img_array, (10, 10), (status_width, status_height), (255, 255, 255), 2)
+        
+        # Count different types
+        total_pairs = len(all_pairs)
+        llm_pairs = len([p for p in all_pairs if p.get("source", "").lower() == "llm"])
+        adaptive_pairs = len([p for p in all_pairs if p.get("source", "").lower() == "adaptive"])
+        non_spatial_count = len(pairs_without_bbox)
+        
+        # Status text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        y_offset = 30
+        
+        cv2.putText(img_array, f"EXTRACTION SUMMARY", (20, y_offset), 
+                   font, 0.6, (255, 255, 255), 2)
+        
+        y_offset += 25
+        cv2.putText(img_array, f"Total: {total_pairs} pairs", (20, y_offset), 
+                   font, 0.5, (255, 255, 255), 1)
+        
+        y_offset += 20
+        # LLM count with orange color
+        cv2.putText(img_array, f"LLM: {llm_pairs}", (20, y_offset), 
+                   font, 0.5, (255, 150, 0), 1)
+        cv2.putText(img_array, f"Adaptive: {adaptive_pairs}", (120, y_offset), 
+                   font, 0.5, (0, 255, 150), 1)
+        
+        y_offset += 20
+        cv2.putText(img_array, f"Spatial: {spatial_pairs_count} | Non-spatial: {non_spatial_count}", (20, y_offset), 
+                   font, 0.4, (200, 200, 200), 1)
+
+    def _draw_overlay_panel(self, img_array, pairs_without_bbox):
+        """Draw enhanced overlay panel for pairs without spatial coordinates"""
+        if not pairs_without_bbox:
+            return
+            
+        height, width = img_array.shape[:2]
+        
+        # Create larger overlay panel for better visibility
+        panel_width = min(400, width // 2)  # Increased width
+        panel_start_x = width - panel_width
+        
+        # Semi-transparent background with better contrast
+        overlay = img_array.copy()
+        cv2.rectangle(overlay, (panel_start_x, 0), (width, height), (20, 20, 20), -1)
+        cv2.addWeighted(img_array, 0.6, overlay, 0.4, 0, img_array)
+        
+        # Panel border with bright color
+        cv2.rectangle(img_array, (panel_start_x, 0), (width-1, height-1), (255, 255, 255), 3)
+        
+        # Header with more contrast
+        header_text = f"Non-Spatial Data ({len(pairs_without_bbox)})"
+        cv2.putText(img_array, header_text, (panel_start_x + 10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(img_array, "LLM extractions without coordinates", (panel_start_x + 10, 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        
+        # Draw each pair with enhanced visibility
+        y_offset = 80
+        line_height = 45  # Increased line height
+        
+        for index, pair in pairs_without_bbox:
+            if y_offset + line_height > height - 20:
+                # If we run out of space, add indicator with count
+                remaining = len(pairs_without_bbox) - pairs_without_bbox.index((index, pair))
+                cv2.putText(img_array, f"...+{remaining} more", (panel_start_x + 10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                break
+                
+            confidence = pair.get("confidence", 0)
+            source = pair.get("source", "unknown")
+            
+            # Use high-contrast color scheme
+            color = self._get_source_color(source, confidence)
+            conf_symbol = self._get_confidence_emoji(confidence)
+            
+            # Source indicator
+            source_prefix = "L" if source.lower() == "llm" else "A" if source.lower() == "adaptive" else "?"
+            
+            # Draw pair number with enhanced visibility
+            pair_text = f"{source_prefix}{index}. {conf_symbol}"
+            cv2.putText(img_array, pair_text, (panel_start_x + 10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            # Draw key with better formatting
+            key_text = pair.get("key", "")[:30]
+            if len(pair.get("key", "")) > 30:
+                key_text += "..."
+            cv2.putText(img_array, f"Key: {key_text}", (panel_start_x + 10, y_offset + 18), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            # Draw value with better formatting
+            value_text = str(pair.get("value", ""))[:25]
+            if len(str(pair.get("value", ""))) > 25:
+                value_text += "..."
+            cv2.putText(img_array, f"Val: {value_text}", (panel_start_x + 10, y_offset + 35), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
+            
+            y_offset += line_height
+
+    def _extract_text_from_bbox(self, image, bbox, ocr_blocks):
+        """Extract OCR text that overlaps with the given bounding box"""
+        if not bbox or not ocr_blocks:
+            return ""
+        
+        bbox_x1, bbox_y1 = bbox["x"], bbox["y"]
+        bbox_x2, bbox_y2 = bbox_x1 + bbox["width"], bbox_y1 + bbox["height"]
+        
+        overlapping_texts = []
+        
+        for block in ocr_blocks:
+            if hasattr(block, 'bbox'):
+                # TextBlock object
+                bx1, by1 = block.bbox.x, block.bbox.y
+                bx2, by2 = bx1 + block.bbox.width, by1 + block.bbox.height
+                text = block.text
+            elif isinstance(block, dict) and 'bbox' in block:
+                # Dictionary format
+                bbox_dict = block['bbox']
+                bx1, by1 = bbox_dict['x'], bbox_dict['y']
+                bx2, by2 = bx1 + bbox_dict['width'], by1 + bbox_dict['height']
+                text = block.get('text', '')
+            else:
+                continue
+            
+            # Check for overlap
+            if (bbox_x1 < bx2 and bbox_x2 > bx1 and bbox_y1 < by2 and bbox_y2 > by1):
+                # Calculate overlap percentage
+                overlap_x = min(bbox_x2, bx2) - max(bbox_x1, bx1)
+                overlap_y = min(bbox_y2, by2) - max(bbox_y1, by1)
+                overlap_area = overlap_x * overlap_y
+                bbox_area = (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1)
+                
+                if overlap_area > bbox_area * 0.3:  # 30% overlap threshold
+                    overlapping_texts.append(text.strip())
+        
+        return " ".join(overlapping_texts)
 
     # Removed OCR blocks overlay in basic UI to simplify presentation
     
@@ -639,7 +924,7 @@ def create_modern_interface():
                     
                     with gr.TabItem("📋 Extracted Data"):
                         result_table = gr.Dataframe(
-                            headers=["#", "Key", "Value", "Confidence", "Source"],
+                            headers=["#", "LLM Key", "LLM Value", "Confidence", "Source", "OCR Key", "OCR Value"],
                             label="Key-Value Pairs",
                             interactive=False,
                             wrap=True

@@ -112,11 +112,15 @@ class AdaptiveDocumentQualityChecker:
         """
         # Get adaptive weights if available, otherwise use defaults
         if weights is None:
-            weights = adaptive_config.get_adaptive_value(
-                "quality_risk_weights", "default_weights"
-            )
+            try:
+                weights = adaptive_config.get_adaptive_value(
+                    "quality_risk_weights", "default_weights"
+                )
+            except Exception as e:
+                logger.debug(f"Failed to get adaptive weights: {e}")
+                weights = None
             
-            # Fallback to sensible defaults if not learned yet
+            # Fallback to sensible defaults if not learned yet or invalid
             if not isinstance(weights, dict):
                 weights = {
                     "blur_score": 0.35,
@@ -126,17 +130,57 @@ class AdaptiveDocumentQualityChecker:
                     "skew_score": 0.1
                 }
         
-        # Normalize scores (0 = good, 1 = bad)
-        score_components = {
-            "blur_score": min(1.0, 1.0 - metrics.get("blur_confidence", 1.0)),  # Low blur confidence → high risk
-            "edge_cut_score": float(metrics.get("edge_cut_flags", 0)) / 4.0,    # Max 4 edges
-            "text_density_score": float(metrics.get("text_density_violations", 0)) / 4.0,
-            "brightness_score": 1.0 if metrics.get("brightness_issue", False) else 0.0,
-            "skew_score": 1.0 if abs(metrics.get("skew_angle", 0)) > 10 else 0.0
-        }
+        # Validate all weights are numeric
+        try:
+            for key, value in weights.items():
+                weights[key] = float(value)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid weight values, using defaults: {e}")
+            weights = {
+                "blur_score": 0.35,
+                "edge_cut_score": 0.25,
+                "text_density_score": 0.2,
+                "brightness_score": 0.1,
+                "skew_score": 0.1
+            }
         
-        # Compute weighted total score
-        total_score = sum(score_components[k] * weights.get(k, 0.0) for k in score_components)
+        # Normalize scores (0 = good, 1 = bad) with proper type checking
+        try:
+            blur_confidence = float(metrics.get("blur_confidence", 1.0))
+            edge_cut_flags = int(metrics.get("edge_cut_flags", 0))
+            text_density_violations = int(metrics.get("text_density_violations", 0))
+            brightness_issue = bool(metrics.get("brightness_issue", False))
+            skew_angle = float(metrics.get("skew_angle", 0))
+            
+            score_components = {
+                "blur_score": min(1.0, 1.0 - blur_confidence),  # Low blur confidence → high risk
+                "edge_cut_score": float(edge_cut_flags) / 4.0,    # Max 4 edges
+                "text_density_score": float(text_density_violations) / 4.0,
+                "brightness_score": 1.0 if brightness_issue else 0.0,
+                "skew_score": 1.0 if abs(skew_angle) > 10 else 0.0
+            }
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error normalizing score components: {e}")
+            # Safe fallback values
+            score_components = {
+                "blur_score": 0.5,
+                "edge_cut_score": 0.0,
+                "text_density_score": 0.0,
+                "brightness_score": 0.0,
+                "skew_score": 0.0
+            }
+        
+        # Compute weighted total score with type validation
+        try:
+            total_score = 0.0
+            for k in score_components:
+                component_value = float(score_components[k])
+                weight_value = float(weights.get(k, 0.0))
+                total_score += component_value * weight_value
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error computing weighted score: {e}")
+            # Fallback to simple average
+            total_score = sum(float(v) for v in score_components.values()) / len(score_components)
         
         # Document-type specific thresholds (can be made adaptive too)
         reject_threshold = 0.65
@@ -302,9 +346,14 @@ class AdaptiveDocumentQualityChecker:
         image_area = height * width
         
         # Get adaptive base blur threshold (learned from previous documents)
-        base_blur_threshold = adaptive_config.get_adaptive_value(
-            "quality_thresholds", "base_blur_threshold"
-        )
+        try:
+            base_blur_threshold = adaptive_config.get_adaptive_value(
+                "quality_thresholds", "base_blur_threshold"
+            )
+            # Ensure it's numeric
+            base_blur_threshold = float(base_blur_threshold)
+        except (ValueError, TypeError, AttributeError):
+            base_blur_threshold = 100.0  # Default fallback
         
         # Adaptive blur threshold based on image size
         size_factor = min(2.0, max(0.5, (image_area / (1024 * 768)) ** 0.5))
@@ -342,30 +391,47 @@ class AdaptiveDocumentQualityChecker:
         bright_threshold = np.argmax(percentiles > 0.95)  # 95th percentile
         
         # Use adaptive bounds instead of hardcoded [30,80] and [180,240]
-        dark_bounds = adaptive_config.get_adaptive_value(
-            "quality_thresholds", "dark_threshold_bounds"
-        )
-        bright_bounds = adaptive_config.get_adaptive_value(
-            "quality_thresholds", "bright_threshold_bounds"  
-        )
+        try:
+            dark_bounds = adaptive_config.get_adaptive_value(
+                "quality_thresholds", "dark_threshold_bounds"
+            )
+        except Exception:
+            dark_bounds = None
+            
+        try:
+            bright_bounds = adaptive_config.get_adaptive_value(
+                "quality_thresholds", "bright_threshold_bounds"  
+            )
+        except Exception:
+            bright_bounds = None
         
-        # Ensure reasonable bounds using learned values
+        # Ensure reasonable bounds using learned values with proper type checking
         if isinstance(dark_bounds, list) and len(dark_bounds) == 2:
-            dark_threshold = max(dark_bounds[0], min(dark_bounds[1], dark_threshold))
+            try:
+                lower_bound = float(dark_bounds[0])
+                upper_bound = float(dark_bounds[1])
+                dark_threshold = max(lower_bound, min(upper_bound, dark_threshold))
+            except (ValueError, TypeError):
+                dark_threshold = max(30, min(80, dark_threshold))  # Fallback
         else:
             dark_threshold = max(30, min(80, dark_threshold))  # Fallback
             
         if isinstance(bright_bounds, list) and len(bright_bounds) == 2:
-            bright_threshold = max(bright_bounds[0], min(bright_bounds[1], bright_threshold))
+            try:
+                lower_bound = float(bright_bounds[0])
+                upper_bound = float(bright_bounds[1])
+                bright_threshold = max(lower_bound, min(upper_bound, bright_threshold))
+            except (ValueError, TypeError):
+                bright_threshold = max(180, min(240, bright_threshold))  # Fallback
         else:
             bright_threshold = max(180, min(240, bright_threshold))  # Fallback
         
         return {
-            'blur_threshold': adaptive_blur_threshold,
-            'dark_threshold': dark_threshold,
-            'bright_threshold': bright_threshold,
-            'size_factor': size_factor,
-            'learned_base_blur': base_blur_threshold,
+            'blur_threshold': float(adaptive_blur_threshold),
+            'dark_threshold': float(dark_threshold),
+            'bright_threshold': float(bright_threshold),
+            'size_factor': float(size_factor),
+            'learned_base_blur': float(base_blur_threshold),
             'adaptive_bounds_used': True
         }
     
@@ -466,9 +532,13 @@ class AdaptiveDocumentQualityChecker:
                     contour_area = cv2.contourArea(largest_contour)
                     
                     # Use adaptive min contour area ratio (learned from previous documents)
-                    min_contour_ratio = adaptive_config.get_adaptive_value(
-                        "quality_thresholds", "min_contour_area_ratio"
-                    )
+                    try:
+                        min_contour_ratio = adaptive_config.get_adaptive_value(
+                            "quality_thresholds", "min_contour_area_ratio"
+                        )
+                        min_contour_ratio = float(min_contour_ratio)
+                    except (ValueError, TypeError, AttributeError):
+                        min_contour_ratio = 0.1  # Default fallback
                     
                     image_area = gray.shape[0] * gray.shape[1]
                     area_ratio = contour_area / image_area
@@ -546,9 +616,13 @@ class AdaptiveDocumentQualityChecker:
                 text_area_ratio = np.sum(edges > 0) / image_area
                 
                 # Use adaptive text area threshold (learned parameter)
-                min_text_ratio = adaptive_config.get_adaptive_value(
-                    "quality_thresholds", "text_area_ratio_threshold"
-                )
+                try:
+                    min_text_ratio = adaptive_config.get_adaptive_value(
+                        "quality_thresholds", "text_area_ratio_threshold"
+                    )
+                    min_text_ratio = float(min_text_ratio)
+                except (ValueError, TypeError, AttributeError):
+                    min_text_ratio = 0.05  # Default fallback
                 
                 if text_area_ratio < min_text_ratio:
                     issues.append("low_content_density")
@@ -674,22 +748,29 @@ class AdaptiveDocumentQualityChecker:
                     
                     # Use advanced features to refine confidence and decision if available
                     if 'overall_quality_score' in advanced_features:
-                        advanced_confidence = advanced_features['overall_quality_score']
-                        # Initial rule-based confidence from risk score
-                        rule_based_confidence = 1.0 - risk_score
-                        # Blend advanced confidence with rule-based confidence (weighted average)
-                        blended_confidence = 0.7 * rule_based_confidence + 0.3 * advanced_confidence
-                        final_confidence = round(blended_confidence, 2)
-                        logger.info(f"Quality confidence enhanced with advanced features: {advanced_confidence:.2f}")
+                        try:
+                            advanced_confidence = float(advanced_features['overall_quality_score'])
+                            # Initial rule-based confidence from risk score
+                            rule_based_confidence = float(1.0 - risk_score)
+                            # Blend advanced confidence with rule-based confidence (weighted average)
+                            blended_confidence = 0.7 * rule_based_confidence + 0.3 * advanced_confidence
+                            final_confidence = round(blended_confidence, 2)
+                            logger.info(f"Quality confidence enhanced with advanced features: {advanced_confidence:.2f}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Error blending confidence scores: {e}")
+                            final_confidence = round(1.0 - risk_score, 2)
                     
                     # Update risk score if statistical modeling is available
                     if 'statistical_risk_probability' in advanced_features:
-                        statistical_risk = advanced_features['statistical_risk_probability']
-                        # Use statistical risk to refine the decision
-                        if statistical_risk > 0.6 and risk_score < 0.6:
-                            risk_score = max(risk_score, statistical_risk * 0.9)  # Weighted blend
-                            risk_decision = "reject" if risk_score >= 0.65 else ("warn" if risk_score >= 0.4 else "accept")
-                            logger.info(f"Risk decision updated with statistical analysis: {risk_decision}")
+                        try:
+                            statistical_risk = float(advanced_features['statistical_risk_probability'])
+                            # Use statistical risk to refine the decision
+                            if statistical_risk > 0.6 and risk_score < 0.6:
+                                risk_score = max(risk_score, statistical_risk * 0.9)  # Weighted blend
+                                risk_decision = "reject" if risk_score >= 0.65 else ("warn" if risk_score >= 0.4 else "accept")
+                                logger.info(f"Risk decision updated with statistical analysis: {risk_decision}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Error using statistical risk: {e}")
                             
                 except Exception as e:
                     logger.warning(f"Advanced quality features failed: {e}")
@@ -969,20 +1050,25 @@ class AdaptiveDocumentQualityChecker:
     def learn_from_margin_feedback(self, document_type: str, was_false_positive: bool, current_margin: float):
         """Learn from user feedback about margin detection accuracy"""
         try:
-            current_value = adaptive_config.get_adaptive_value(
-                "quality_thresholds", "cut_edge_margin_pct", document_type
-            )
+            try:
+                current_value = adaptive_config.get_adaptive_value(
+                    "quality_thresholds", "cut_edge_margin_pct", document_type
+                )
+                current_value = float(current_value)
+            except (ValueError, TypeError, AttributeError):
+                current_value = float(current_margin)
             
-            if not isinstance(current_value, (int, float)):
-                current_value = current_margin
+            # Ensure current_value is valid before multiplication
+            if not isinstance(current_value, (int, float)) or current_value <= 0:
+                current_value = float(current_margin) if current_margin > 0 else 0.03
             
             if was_false_positive:
                 # Reduce sensitivity (increase margin) if it was a false positive
-                new_margin = min(0.08, current_value * 1.2)  # Cap at 8%
+                new_margin = min(0.08, float(current_value) * 1.2)  # Cap at 8%
                 logger.info(f"Reducing margin sensitivity for {document_type}: {current_value:.3f} -> {new_margin:.3f}")
             else:
                 # Increase sensitivity (decrease margin) if it was a true positive that we should catch better
-                new_margin = max(0.005, current_value * 0.9)  # Floor at 0.5%  
+                new_margin = max(0.005, float(current_value) * 0.9)  # Floor at 0.5%  
                 logger.info(f"Increasing margin sensitivity for {document_type}: {current_value:.3f} -> {new_margin:.3f}")
             
             # Update the learned margin

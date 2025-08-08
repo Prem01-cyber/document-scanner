@@ -160,10 +160,29 @@ class AdaptiveConfig:
                     weighted_avg = default_value
             
             # Blend with default based on confidence
-            adaptive_value = (
-                default_value * (1 - confidence_weight) + 
-                weighted_avg * confidence_weight
-            )
+            try:
+                # Handle case where default_value might be a list
+                if isinstance(default_value, list):
+                    default_value = default_value[0] if len(default_value) > 0 else 0.5
+                default_value = float(default_value)
+                
+                confidence_weight = float(confidence_weight)
+                weighted_avg = float(weighted_avg)
+                
+                adaptive_value = (
+                    default_value * (1 - confidence_weight) + 
+                    weighted_avg * confidence_weight
+                )
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Error in blending calculation: {e}. Using fallback value.")
+                # Safe fallback 
+                if isinstance(default_value, list):
+                    adaptive_value = float(default_value[0]) if len(default_value) > 0 else 0.5
+                else:
+                    try:
+                        adaptive_value = float(default_value)
+                    except (ValueError, TypeError):
+                        adaptive_value = 0.5
             
             # Ensure within adaptive range
             min_val, max_val = param_config["adaptive_range"]

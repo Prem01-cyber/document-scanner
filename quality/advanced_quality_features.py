@@ -13,31 +13,37 @@ from typing import Dict, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
-# Import advanced libraries with graceful fallback
+# Import advanced libraries with graceful fallback and detailed diagnostics
 try:
     from scipy.stats import skew, entropy, zscore
     from scipy.spatial.distance import pdist
     from scipy.ndimage import label, gaussian_filter
     SCIPY_AVAILABLE = True
-except ImportError:
+    logger.info("✅ SciPy successfully imported for advanced quality features")
+except ImportError as e:
     SCIPY_AVAILABLE = False
-    logger.warning("SciPy not available. Using basic quality features only.")
+    logger.warning(f"❌ SciPy not available: {e}. Using basic quality features only.")
 
 try:
     from skimage.filters import sobel
     from skimage.feature import corner_harris
     from skimage.morphology import binary_closing, disk
     SKIMAGE_AVAILABLE = True
-except ImportError:
+    logger.info("✅ Scikit-image successfully imported for enhanced blur detection")
+except ImportError as e:
     SKIMAGE_AVAILABLE = False
-    logger.warning("Scikit-image not available. Using basic quality features only.")
+    logger.warning(f"❌ Scikit-image not available: {e}. Using basic quality features only.")
 
 try:
     import statsmodels.api as sm
     STATSMODELS_AVAILABLE = True
-except ImportError:
+    logger.info("✅ Statsmodels successfully imported for statistical modeling")
+except ImportError as e:
     STATSMODELS_AVAILABLE = False
-    logger.warning("Statsmodels not available. Using basic statistical modeling only.")
+    logger.warning(f"❌ Statsmodels not available: {e}. Using basic statistical modeling only.")
+
+# Log overall availability status
+logger.info(f"🔬 Advanced Quality Features Status: SciPy={SCIPY_AVAILABLE}, Scikit-image={SKIMAGE_AVAILABLE}, Statsmodels={STATSMODELS_AVAILABLE}")
 
 
 class AdvancedQualityAnalyzer:
@@ -149,8 +155,20 @@ class AdvancedQualityAnalyzer:
         
         # Contrast measures
         results['rms_contrast'] = float(np.sqrt(np.mean((gray_image - np.mean(gray_image)) ** 2)))
-        results['michelson_contrast'] = float((np.max(gray_image) - np.min(gray_image)) / 
-                                            (np.max(gray_image) + np.min(gray_image) + 1e-10))
+        
+        # Safe Michelson contrast calculation to avoid overflow
+        try:
+            max_val = float(np.max(gray_image))
+            min_val = float(np.min(gray_image))
+            numerator = max_val - min_val
+            denominator = max_val + min_val
+            
+            if denominator > 0:
+                results['michelson_contrast'] = numerator / denominator
+            else:
+                results['michelson_contrast'] = 0.0
+        except (OverflowError, RuntimeWarning):
+            results['michelson_contrast'] = 0.0
         
         # Quality flags
         results['brightness_issue'] = (

@@ -29,6 +29,14 @@ from quality.quality_data_collector import quality_data_collector
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Import visual overlay for quality assessment
+try:
+    from quality.visual_overlay import create_quality_overlay
+    VISUAL_OVERLAY_AVAILABLE = True
+except ImportError:
+    VISUAL_OVERLAY_AVAILABLE = False
+    logger.warning("Visual overlay not available")
+
 class EnhancedDocumentProcessor:
     """Enhanced document processor with quality assessment UI"""
     
@@ -172,6 +180,21 @@ class EnhancedDocumentProcessor:
         # Create annotated image
         annotated_image = self._create_enhanced_annotation(original_image, filtered_pairs, confidence_threshold)
         
+        # Create quality overlay image if available
+        quality_overlay_image = None
+        if VISUAL_OVERLAY_AVAILABLE and result.get("quality_assessment"):
+            try:
+                # Convert PIL to numpy for overlay processing
+                image_array = np.array(original_image)
+                text_blocks = result.get("text_blocks", [])
+                quality_overlay_array = create_quality_overlay(
+                    image_array, result["quality_assessment"], text_blocks
+                )
+                quality_overlay_image = Image.fromarray(cv2.cvtColor(quality_overlay_array, cv2.COLOR_BGR2RGB))
+            except Exception as e:
+                logger.warning(f"Failed to create quality overlay: {e}")
+                quality_overlay_image = annotated_image
+        
         # Create table data
         table_data = []
         for i, pair in enumerate(filtered_pairs, 1):
@@ -213,6 +236,7 @@ class EnhancedDocumentProcessor:
         return {
             "success": True,
             "image": annotated_image,
+            "quality_overlay": quality_overlay_image or annotated_image,
             "table": table_data,
             "summary": summary,
             "quality_assessment": result.get("quality_assessment", {}),
@@ -412,6 +436,7 @@ def create_enhanced_interface():
             
             return (
                 result["image"],
+                result.get("quality_overlay", result["image"]),  # Quality overlay image
                 result["table"], 
                 result["summary"],
                 quality_display,
@@ -420,6 +445,7 @@ def create_enhanced_interface():
         else:
             return (
                 None,
+                None,  # No quality overlay for errors
                 [],
                 result["summary"],
                 "Quality assessment not available due to processing error.",
@@ -498,8 +524,16 @@ def create_enhanced_interface():
         # Advanced quality assessment
         advanced_assessment = quality_assessment.get("advanced_quality_assessment", {})
         if advanced_assessment and advanced_assessment.get("advanced_features_available", False):
-            overall_score = advanced_assessment.get("overall_quality_score", 0)
-            quality_class = advanced_assessment.get("quality_class", "unknown")
+            overall_score = advanced_assessment.get("overall_quality_score", 0) or 0
+            quality_class = advanced_assessment.get("quality_class", "unknown") or "unknown"
+            
+            # Ensure numeric values
+            try:
+                overall_score = float(overall_score)
+                quality_class = str(quality_class)
+            except (ValueError, TypeError):
+                overall_score = 0.0
+                quality_class = "unknown"
             
             # Quality class icon
             class_icons = {"excellent": "🌟", "good": "✅", "fair": "⚠️", "poor": "❌", "unknown": "❓"}
@@ -514,9 +548,19 @@ def create_enhanced_interface():
             # Enhanced blur analysis
             blur_analysis = advanced_assessment.get("enhanced_blur_analysis", {})
             if blur_analysis:
-                tenengrad = blur_analysis.get("tenengrad_energy", 0)
-                composite_blur = blur_analysis.get("composite_blur_confidence", 0)
-                brenner = blur_analysis.get("brenner_focus", 0)
+                tenengrad = blur_analysis.get("tenengrad_energy", 0) or 0
+                composite_blur = blur_analysis.get("composite_blur_confidence", 0) or 0
+                brenner = blur_analysis.get("brenner_focus", 0) or 0
+                
+                # Ensure numeric values
+                try:
+                    tenengrad = float(tenengrad)
+                    composite_blur = float(composite_blur)
+                    brenner = float(brenner)
+                except (ValueError, TypeError):
+                    tenengrad = 0.0
+                    composite_blur = 0.0
+                    brenner = 0.0
                 
                 display += f"""
 #### 🌫️ Enhanced Blur Detection
@@ -528,11 +572,25 @@ def create_enhanced_interface():
             # Brightness analysis
             brightness_analysis = advanced_assessment.get("brightness_analysis", {})
             if brightness_analysis:
-                skewness = brightness_analysis.get("brightness_skewness", 0)
-                entropy = brightness_analysis.get("brightness_entropy", 0)
-                overexposure = brightness_analysis.get("overexposure_ratio", 0)
-                underexposure = brightness_analysis.get("underexposure_ratio", 0)
-                contrast = brightness_analysis.get("rms_contrast", 0)
+                skewness = brightness_analysis.get("brightness_skewness", 0) or 0
+                entropy = brightness_analysis.get("brightness_entropy", 0) or 0
+                overexposure = brightness_analysis.get("overexposure_ratio", 0) or 0
+                underexposure = brightness_analysis.get("underexposure_ratio", 0) or 0
+                contrast = brightness_analysis.get("rms_contrast", 0) or 0
+                
+                # Ensure numeric values
+                try:
+                    skewness = float(skewness)
+                    entropy = float(entropy)
+                    overexposure = float(overexposure)
+                    underexposure = float(underexposure)
+                    contrast = float(contrast)
+                except (ValueError, TypeError):
+                    skewness = 0.0
+                    entropy = 0.0
+                    overexposure = 0.0
+                    underexposure = 0.0
+                    contrast = 0.0
                 
                 display += f"""
 #### 💡 Statistical Brightness Analysis
@@ -546,9 +604,20 @@ def create_enhanced_interface():
             # Text layout analysis
             layout_analysis = advanced_assessment.get("text_layout_analysis", {})
             if layout_analysis:
-                spacing_var = layout_analysis.get("text_spacing_variance", 0)
-                alignment_score = layout_analysis.get("text_alignment_score", 0)
-                density_uniformity = layout_analysis.get("text_density_uniformity", 0)
+                # Safe value extraction with None handling
+                spacing_var = layout_analysis.get("text_spacing_variance", 0) or 0
+                alignment_score = layout_analysis.get("text_alignment_score", 0) or 0
+                density_uniformity = layout_analysis.get("text_density_uniformity", 0) or 0
+                
+                # Ensure values are numeric
+                try:
+                    spacing_var = float(spacing_var)
+                    alignment_score = float(alignment_score)
+                    density_uniformity = float(density_uniformity)
+                except (ValueError, TypeError):
+                    spacing_var = 0.0
+                    alignment_score = 0.0
+                    density_uniformity = 0.0
                 
                 display += f"""
 #### 📝 Text Layout Analysis
@@ -560,9 +629,19 @@ def create_enhanced_interface():
             # Morphological analysis
             morph_analysis = advanced_assessment.get("morphological_analysis", {})
             if morph_analysis:
-                edge_density = morph_analysis.get("edge_density", 0)
-                components = morph_analysis.get("connected_components", 0)
-                border_density = morph_analysis.get("border_edge_density", 0)
+                edge_density = morph_analysis.get("edge_density", 0) or 0
+                components = morph_analysis.get("connected_components", 0) or 0
+                border_density = morph_analysis.get("border_edge_density", 0) or 0
+                
+                # Ensure numeric values
+                try:
+                    edge_density = float(edge_density)
+                    components = int(components)
+                    border_density = float(border_density)
+                except (ValueError, TypeError):
+                    edge_density = 0.0
+                    components = 0
+                    border_density = 0.0
                 
                 display += f"""
 #### 🔍 Morphological Edge Analysis
@@ -574,9 +653,19 @@ def create_enhanced_interface():
             # Statistical modeling
             stats_modeling = advanced_assessment.get("statistical_modeling", {})
             if stats_modeling:
-                risk_prob = stats_modeling.get("statistical_risk_probability", 0)
-                confidence = stats_modeling.get("statistical_confidence", 0)
-                dominant_factor = stats_modeling.get("dominant_risk_factor", "unknown")
+                risk_prob = stats_modeling.get("statistical_risk_probability", 0) or 0
+                confidence = stats_modeling.get("statistical_confidence", 0) or 0
+                dominant_factor = stats_modeling.get("dominant_risk_factor", "unknown") or "unknown"
+                
+                # Ensure numeric values
+                try:
+                    risk_prob = float(risk_prob)
+                    confidence = float(confidence)
+                    dominant_factor = str(dominant_factor)
+                except (ValueError, TypeError):
+                    risk_prob = 0.0
+                    confidence = 0.0
+                    dominant_factor = "unknown"
                 
                 display += f"""
 #### 📊 Statistical Risk Modeling
@@ -585,10 +674,32 @@ def create_enhanced_interface():
 - **Dominant Risk Factor:** {dominant_factor.replace('_', ' ').title()}
 """
         else:
+            # Check what advanced packages are actually available
+            try:
+                import scipy
+                scipy_status = "✅ Available"
+            except ImportError:
+                scipy_status = "❌ Missing"
+            
+            try:
+                import sklearn
+                sklearn_status = "✅ Available" 
+            except ImportError:
+                sklearn_status = "❌ Missing"
+                
+            try:
+                import statsmodels
+                statsmodels_status = "✅ Available"
+            except ImportError:
+                statsmodels_status = "❌ Missing"
+            
             display += f"""
 ### 🔬 Advanced Quality Analysis
 - **Status:** Not Available
-- **Note:** Install scikit-image, scipy, and statsmodels for advanced features
+- **SciPy:** {scipy_status}
+- **Scikit-learn:** {sklearn_status}
+- **Statsmodels:** {statsmodels_status}
+- **Note:** If packages show as available but features don't work, restart the application
 """
         
         # Rescan recommendations
@@ -761,6 +872,21 @@ def create_enhanced_interface():
                         **K#** = Key, **V#** = Value, Lines show connections
                         """)
                     
+                    with gr.TabItem("🔍 Quality Overlay"):
+                        quality_overlay_image = gr.Image(
+                            label="Quality Assessment Overlay",
+                            interactive=False
+                        )
+                        
+                        gr.Markdown("""
+                        **Quality Overlay Legend:**  
+                        🔴 **Red Boxes** = Edge cuts detected  
+                        🟠 **Orange Boxes** = Text near edges  
+                        🟡 **Yellow Indicators** = Density violations  
+                        **Top-right Badge** = Overall quality score  
+                        **Gray Dashed Lines** = Safe margin guidelines
+                        """)
+                    
                     with gr.TabItem("📋 Extracted Data"):
                         result_table = gr.Dataframe(
                             headers=["#", "Key", "Value", "Confidence", "Source"],
@@ -828,7 +954,7 @@ def create_enhanced_interface():
         process_btn.click(
             fn=process_document_ui,
             inputs=[image_input, strategy_input, confidence_input, llm_provider_input],
-            outputs=[result_image, result_table, result_summary, quality_display, session_id_display]
+            outputs=[result_image, quality_overlay_image, result_table, result_summary, quality_display, session_id_display]
         )
         
         feedback_btn.click(

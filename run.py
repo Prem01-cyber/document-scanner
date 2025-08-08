@@ -451,6 +451,114 @@ LOG_LEVEL=INFO
             except ImportError:
                 self.log_error(f"  ❌ {package}")
     
+    def check_dependencies(self, action: Optional[str] = None):
+        """Check and manage advanced quality assessment dependencies"""
+        self.log_info("🔬 Advanced Quality Dependencies Check:")
+        
+        # Advanced packages for quality assessment
+        advanced_packages = {
+            'scipy': 'SciPy - Statistical analysis and spatial operations',
+            'sklearn': 'Scikit-learn - Machine learning algorithms',
+            'statsmodels': 'Statsmodels - Statistical modeling',
+            'skimage': 'Scikit-image - Advanced image processing'
+        }
+        
+        missing_packages = []
+        available_packages = []
+        
+        for package, description in advanced_packages.items():
+            try:
+                if package == 'sklearn':
+                    import sklearn
+                elif package == 'skimage':
+                    import skimage
+                else:
+                    __import__(package)
+                self.log_success(f"  ✅ {package} - {description}")
+                available_packages.append(package)
+            except ImportError:
+                self.log_error(f"  ❌ {package} - {description}")
+                missing_packages.append(package)
+        
+        # Check specific imports needed for advanced features
+        self.log_info("\n🧪 Advanced Feature Components:")
+        
+        feature_imports = {
+            'scipy.stats': 'Statistical measures (entropy, skewness)',
+            'scipy.spatial': 'Spatial distance calculations', 
+            'scipy.ndimage': 'Image morphological analysis',
+            'skimage.filters': 'Enhanced blur detection (Sobel, Tenengrad)',
+            'statsmodels.api': 'Statistical risk modeling'
+        }
+        
+        for import_name, description in feature_imports.items():
+            try:
+                module_parts = import_name.split('.')
+                if len(module_parts) == 2:
+                    module = __import__(module_parts[0])
+                    getattr(module, module_parts[1])
+                else:
+                    __import__(import_name)
+                self.log_success(f"  ✅ {import_name} - {description}")
+            except (ImportError, AttributeError):
+                self.log_warn(f"  ⚠️ {import_name} - {description}")
+        
+        # Handle actions
+        if action == "install":
+            self.log_info("\n📦 Installing missing advanced dependencies...")
+            if missing_packages:
+                try:
+                    # Map package names to pip names
+                    pip_names = {
+                        'skimage': 'scikit-image',
+                        'sklearn': 'scikit-learn',
+                        'scipy': 'scipy',
+                        'statsmodels': 'statsmodels'
+                    }
+                    
+                    packages_to_install = [pip_names.get(pkg, pkg) for pkg in missing_packages]
+                    cmd = [sys.executable, "-m", "pip", "install"] + packages_to_install
+                    
+                    self.log_info(f"Running: {' '.join(cmd)}")
+                    subprocess.run(cmd, check=True, cwd=self.project_root)
+                    self.log_success("✅ Installation completed!")
+                    self.log_info("🔄 Please restart your application to use new features")
+                    
+                except subprocess.CalledProcessError as e:
+                    self.log_error(f"❌ Installation failed: {e}")
+            else:
+                self.log_success("✅ All advanced dependencies are already installed!")
+        
+        elif action == "verify":
+            self.log_info("\n🧪 Verifying advanced quality features...")
+            try:
+                # Test import of advanced quality features
+                from quality.advanced_quality_features import SCIPY_AVAILABLE, SKIMAGE_AVAILABLE, STATSMODELS_AVAILABLE
+                
+                self.log_info("Advanced features status:")
+                status_map = {True: "✅ Available", False: "❌ Not Available"}
+                self.log_info(f"  SciPy Features: {status_map[SCIPY_AVAILABLE]}")
+                self.log_info(f"  Scikit-image Features: {status_map[SKIMAGE_AVAILABLE]}")
+                self.log_info(f"  Statsmodels Features: {status_map[STATSMODELS_AVAILABLE]}")
+                
+                if all([SCIPY_AVAILABLE, SKIMAGE_AVAILABLE, STATSMODELS_AVAILABLE]):
+                    self.log_success("🎉 All advanced quality features are fully operational!")
+                else:
+                    self.log_warn("⚠️ Some advanced features may not be available. Run 'python run.py deps install' to install missing packages.")
+                    
+            except ImportError as e:
+                self.log_error(f"❌ Failed to verify advanced features: {e}")
+        
+        elif action is None:
+            # Default action - just show status and suggestions
+            if missing_packages:
+                self.log_info(f"\n💡 To install missing packages, run: python run.py deps install")
+            
+            self.log_info(f"💡 To verify advanced features, run: python run.py deps verify")
+        
+        else:
+            self.log_error(f"❌ Unknown action: {action}. Use 'install' or 'verify'")
+    
     def stop_services(self):
         """Stop all running services"""
         self.log_info("🛑 Stopping all services...")
@@ -528,13 +636,16 @@ Examples:
   python run.py test               # Run diagnostics
   python run.py train              # Train ML model
   python run.py demo risk          # Run risk scoring demo
+  python run.py deps               # Check advanced dependencies
+  python run.py deps install       # Install missing dependencies
+  python run.py deps verify        # Verify advanced features
   python run.py stop               # Stop all services
         """
     )
     
     parser.add_argument('command', choices=[
         'setup', 'ui', 'api', 'hybrid-api', 'status', 'test', 'train', 
-        'demo', 'stop', 'deploy'
+        'demo', 'stop', 'deploy', 'deps'
     ], help='Command to execute')
     
     parser.add_argument('subcommand', nargs='?', help='Subcommand (e.g., demo name)')
@@ -576,6 +687,9 @@ Examples:
             
         elif args.command == 'deploy':
             runner.deploy()
+            
+        elif args.command == 'deps':  
+            runner.check_dependencies(args.subcommand)
             
     except KeyboardInterrupt:
         runner.log_info("\n👋 Goodbye!")

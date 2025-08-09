@@ -415,9 +415,9 @@ class DocumentProcessor:
                 pairs_without_bbox.append((display_index, pair))
                 display_index += 1
         
-        # Draw overlay for pairs without spatial coordinates
+        # Draw numbered callouts for LLM pairs without spatial coordinates
         if pairs_without_bbox:
-            self._draw_overlay_panel(img_array, pairs_without_bbox)
+            self._draw_llm_callouts(img_array, pairs_without_bbox)
         
         # Add comprehensive status display
         self._draw_status_overlay(img_array, pairs, pairs_without_bbox, display_index - 1)
@@ -530,6 +530,167 @@ class DocumentProcessor:
         y_offset += 20
         cv2.putText(img_array, f"Spatial: {spatial_pairs_count} | Non-spatial: {non_spatial_count}", (20, y_offset), 
                    font, 0.4, (200, 200, 200), 1)
+
+    def _draw_llm_callouts(self, img_array, pairs_without_bbox):
+        """Draw numbered callouts for LLM pairs and create a legend"""
+        if not pairs_without_bbox:
+            return
+            
+        height, width = img_array.shape[:2]
+        
+        # Filter to only LLM pairs
+        llm_pairs = [(idx, pair) for idx, pair in pairs_without_bbox if pair.get("source", "").lower() == "llm"]
+        
+        if not llm_pairs:
+            return
+        
+        # Draw numbered callouts scattered across the image
+        callout_positions = self._generate_callout_positions(width, height, len(llm_pairs))
+        
+        for i, ((index, pair), (x, y)) in enumerate(zip(llm_pairs, callout_positions)):
+            confidence = pair.get("confidence", 0)
+            color = self._get_source_color("llm", confidence)
+            
+            # Draw larger numbered circle callout
+            radius = 25
+            
+            # Draw filled circle with border
+            cv2.circle(img_array, (x, y), radius, color, -1)  # Filled circle
+            cv2.circle(img_array, (x, y), radius, (255, 255, 255), 3)  # White border
+            
+            # Draw number in the circle
+            number_text = str(index)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+            
+            # Get text size to center it
+            (text_width, text_height), _ = cv2.getTextSize(number_text, font, font_scale, thickness)
+            text_x = x - text_width // 2
+            text_y = y + text_height // 2
+            
+            cv2.putText(img_array, number_text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness)
+            
+            # Draw connecting line to make it more visible
+            line_end_x = x + radius + 15
+            line_end_y = y - radius - 15
+            cv2.line(img_array, (x + radius, y - radius), (line_end_x, line_end_y), color, 2)
+        
+        # Draw legend for the callouts
+        self._draw_llm_legend(img_array, llm_pairs)
+    
+    def _generate_callout_positions(self, width, height, count):
+        """Generate non-overlapping positions for callouts"""
+        positions = []
+        margin = 50
+        radius = 30
+        
+        # Create grid-like positions that avoid overlapping with likely content areas
+        cols = min(4, count)  # Max 4 columns
+        rows = (count + cols - 1) // cols  # Ceiling division
+        
+        # Position callouts along the edges and corners
+        edge_positions = [
+            # Top edge
+            (width // 4, margin + radius),
+            (width // 2, margin + radius),
+            (3 * width // 4, margin + radius),
+            # Right edge
+            (width - margin - radius, height // 4),
+            (width - margin - radius, height // 2),
+            (width - margin - radius, 3 * height // 4),
+            # Bottom edge
+            (3 * width // 4, height - margin - radius),
+            (width // 2, height - margin - radius),
+            (width // 4, height - margin - radius),
+            # Left edge
+            (margin + radius, 3 * height // 4),
+            (margin + radius, height // 2),
+            (margin + radius, height // 4),
+        ]
+        
+        # Use as many edge positions as needed
+        for i in range(min(count, len(edge_positions))):
+            positions.append(edge_positions[i])
+        
+        # If we need more positions, create additional ones
+        if count > len(edge_positions):
+            for i in range(len(edge_positions), count):
+                # Create additional positions in corners or free spaces
+                x = margin + radius + (i % 3) * 60
+                y = margin + radius + ((i // 3) % 3) * 60
+                positions.append((x, y))
+        
+        return positions[:count]
+    
+    def _draw_llm_legend(self, img_array, llm_pairs):
+        """Draw legend showing what each numbered callout represents"""
+        if not llm_pairs:
+            return
+            
+        height, width = img_array.shape[:2]
+        
+        # Calculate legend dimensions
+        max_pairs_to_show = min(len(llm_pairs), 8)  # Show max 8 in legend, scroll for more
+        legend_height = 60 + (max_pairs_to_show * 35)
+        legend_width = min(450, width - 40)
+        
+        # Position legend in bottom-left area
+        legend_x = 20
+        legend_y = max(150, height - legend_height - 20)
+        
+        # Semi-transparent background
+        overlay = img_array.copy()
+        cv2.rectangle(overlay, (legend_x, legend_y), (legend_x + legend_width, legend_y + legend_height), (0, 0, 0), -1)
+        cv2.addWeighted(img_array, 0.7, overlay, 0.3, 0, img_array)
+        
+        # Border
+        cv2.rectangle(img_array, (legend_x, legend_y), (legend_x + legend_width, legend_y + legend_height), (255, 255, 255), 2)
+        
+        # Header
+        cv2.putText(img_array, "LLM EXTRACTIONS", (legend_x + 10, legend_y + 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Draw each pair info
+        y_offset = legend_y + 50
+        
+        for i, (index, pair) in enumerate(llm_pairs[:max_pairs_to_show]):
+            confidence = pair.get("confidence", 0)
+            color = self._get_source_color("llm", confidence)
+            conf_symbol = self._get_confidence_emoji(confidence)
+            
+            # Draw number circle (mini version)
+            circle_x = legend_x + 25
+            circle_y = y_offset + 5
+            cv2.circle(img_array, (circle_x, circle_y), 12, color, -1)
+            cv2.circle(img_array, (circle_x, circle_y), 12, (255, 255, 255), 2)
+            cv2.putText(img_array, str(index), (circle_x - 5, circle_y + 4), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Draw key-value pair info
+            key_text = pair.get("key", "")[:25]
+            value_text = str(pair.get("value", ""))[:20]
+            
+            if len(pair.get("key", "")) > 25:
+                key_text += "..."
+            if len(str(pair.get("value", ""))) > 20:
+                value_text += "..."
+            
+            # Key
+            cv2.putText(img_array, f"{key_text}: {value_text}", (legend_x + 50, y_offset + 8), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            # Confidence
+            cv2.putText(img_array, f"{conf_symbol} {confidence:.2f}", (legend_x + legend_width - 80, y_offset + 8), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+            
+            y_offset += 35
+        
+        # Show "more" indicator if needed
+        if len(llm_pairs) > max_pairs_to_show:
+            remaining = len(llm_pairs) - max_pairs_to_show
+            cv2.putText(img_array, f"...and {remaining} more (see table)", (legend_x + 10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
     def _draw_overlay_panel(self, img_array, pairs_without_bbox):
         """Draw enhanced overlay panel for pairs without spatial coordinates"""
